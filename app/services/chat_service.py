@@ -108,25 +108,25 @@ def parse_message(message: str):
     """
     메시지를 <think>...</think> 태그를 기준으로 분리
     """
-    # think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL)
-    # think_match = think_pattern.search(message)
+    think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL)
+    think_match = think_pattern.search(message)
 
-    # if think_match:
-    #     think_message = think_match.group(1).strip()
-    #     main_message = think_pattern.sub("", message).strip()  # <think> 태그 제거
-    # else:
-    #     think_message = ""
-    #     main_message = message.strip()
+    if think_match:
+        think_message = think_match.group(1).strip()
+        main_message = think_pattern.sub("", message).strip()  # <think> 태그 제거
+    else:
+        think_message = ""
+        main_message = message.strip()
 
-    # 태그 제거를 위한 정규식 패턴 강화
-    think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL | re.IGNORECASE)
+    # # 태그 제거를 위한 정규식 패턴 강화
+    # think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL | re.IGNORECASE)
 
-    # 여러 개의 <think> 태그 처리
-    think_matches = think_pattern.findall(message)
-    think_message = "\n".join(think_matches).strip()
+    # # 여러 개의 <think> 태그 처리
+    # think_matches = think_pattern.findall(message)
+    # think_message = "\n".join(think_matches).strip()
 
-    # 메인 메시지 정제
-    main_message = think_pattern.sub("", message)
-    main_message = re.sub(r"\s+", " ", main_message).strip()  # 연속 공백 제거
+    # # 메인 메시지 정제
+    # main_message = think_pattern.sub("", message)
+    # main_message = re.sub(r"\s+", " ", main_message).strip()  # 연속 공백 제거
 
     return main_message, think_message

@@ -122,10 +122,13 @@ async def chat(request: Request):
                 yield {"event": "title_start", "data": ""}
 
                 title = await chat_service.generate_title(llm, message, main_message)
+                main_title, _ = chat_service.parse_message(title)
 
                 # 대화 이력 DB 저장
                 try:
-                    await chat_crud.create_chat_session(conversation_id, title, user_id)
+                    await chat_crud.create_chat_session(
+                        conversation_id, main_title, user_id
+                    )
                     await chat_crud.create_chat_message(
                         conversation_id,
                         message_id,
