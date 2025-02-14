@@ -80,7 +80,11 @@ async def generate_title(llm: ChatOllama, user_message: str, ai_response: str) -
         [
             (
                 "system",
-                "다음 대화 내용을 간결하게 요약하여 제목을 생성하세요. 제목은 10단어 이내로 작성하세요.",
+                """다음 대화 내용을 간결하게 요약하여 제목을 생성하세요.
+                   - 제목은 10단어 이내로 작성하세요.
+                   - 반드시 한국어만 사용
+                   - 추론 과정(<think>내용)은 무시
+                   - 핵심 키워드 위주로 구성""",
             ),
             ("human", "사용자: {user_message}\nAI: {ai_response}"),
         ]
@@ -104,14 +108,25 @@ def parse_message(message: str):
     """
     메시지를 <think>...</think> 태그를 기준으로 분리
     """
-    think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL)
-    think_match = think_pattern.search(message)
+    # think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL)
+    # think_match = think_pattern.search(message)
 
-    if think_match:
-        think_message = think_match.group(1).strip()
-        main_message = think_pattern.sub("", message).strip()  # <think> 태그 제거
-    else:
-        think_message = ""
-        main_message = message.strip()
+    # if think_match:
+    #     think_message = think_match.group(1).strip()
+    #     main_message = think_pattern.sub("", message).strip()  # <think> 태그 제거
+    # else:
+    #     think_message = ""
+    #     main_message = message.strip()
+
+    # 태그 제거를 위한 정규식 패턴 강화
+    think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL | re.IGNORECASE)
+
+    # 여러 개의 <think> 태그 처리
+    think_matches = think_pattern.findall(message)
+    think_message = "\n".join(think_matches).strip()
+
+    # 메인 메시지 정제
+    main_message = think_pattern.sub("", message)
+    main_message = re.sub(r"\s+", " ", main_message).strip()  # 연속 공백 제거
 
     return main_message, think_message
