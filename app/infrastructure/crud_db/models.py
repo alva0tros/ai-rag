@@ -1,5 +1,6 @@
 from sqlalchemy import (
     Column,
+    Boolean,
     Integer,
     String,
     Text,
@@ -48,6 +49,10 @@ class ChatMessage(Base):
     user_message = Column(Text, nullable=False)
     main_message = Column(Text, nullable=False)
     think_message = Column(Text, nullable=True)
+    think_time = Column(Integer, nullable=True)
+    liked = Column(Boolean, nullable=True)
+    disliked = Column(Boolean, nullable=True)
+    dislike_feedback = Column(Text, nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
