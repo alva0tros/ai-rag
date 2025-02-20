@@ -3,7 +3,7 @@ import datetime
 from sqlalchemy import select, delete
 
 from app.infrastructure.crud_db.session import async_session
-from app.infrastructure.crud_db.models import ChatSession, ChatMessage
+from app.infrastructure.crud_db.chat_models import ChatSession, ChatMessage
 
 
 logger = logging.getLogger(__name__)

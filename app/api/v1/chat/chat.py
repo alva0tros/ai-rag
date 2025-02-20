@@ -6,8 +6,8 @@ import logging
 
 from fastapi import APIRouter, Request, HTTPException
 from sse_starlette.sse import EventSourceResponse
-from app.services import chat_service
-from app.services import chat_crud
+from app.services.chat import chat_service
+from app.services.chat import chat_crud
 
 
 router = APIRouter()
@@ -27,7 +27,7 @@ def get_llm(callback_handler):
     return llm
 
 
-@router.post("/chat")
+@router.post("/chat/chat")
 async def chat(request: Request):
 
     # 요청 본문 파싱
@@ -194,7 +194,7 @@ async def chat(request: Request):
     return EventSourceResponse(event_generator())
 
 
-@router.post("/stop")
+@router.post("/chat/stop")
 async def stop_chat(request: Request):
     data = await request.json()
     conversation_id = data.get("conversation_id", "default")

@@ -2,7 +2,7 @@
 import os  # Optional for faster downloading
 from huggingface_hub import snapshot_download
 
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+# os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 # LLM 추론 모델(DeepSeek-R1) 다운
 # snapshot_download(

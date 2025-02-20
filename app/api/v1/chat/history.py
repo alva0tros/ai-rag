@@ -2,14 +2,14 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Body
 from pydantic import BaseModel
-from app.services import chat_crud
-from app.infrastructure.crud_db.models import ChatSession, ChatMessage
+from app.services.chat import chat_crud
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.get("/sessions/{user_id}")
+@router.get("/chat/sessions/{user_id}")
 async def get_all_sessions(user_id):
     try:
         chat_sessions = await chat_crud.get_all_chat_sessions(user_id)
@@ -27,7 +27,7 @@ async def get_all_sessions(user_id):
         raise HTTPException(status_code=500, detail="Error fetching chat sessions")
 
 
-@router.get("/messages/{session_id}")
+@router.get("/chat/messages/{session_id}")
 async def get_messages(session_id, limit=100, offset=0):
     messages = await chat_crud.get_chat_messages(session_id, limit, offset)
     messages_data = [
@@ -47,7 +47,7 @@ async def get_messages(session_id, limit=100, offset=0):
     return messages_data
 
 
-@router.delete("/delete_session/{session_id}")
+@router.delete("/chat/delete_session/{session_id}")
 async def delete_session(session_id: str):
     try:
         await chat_crud.delete_chat_session(session_id)
@@ -56,7 +56,7 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.patch("/update_session/{session_id}")
+@router.patch("/chat/update_session/{session_id}")
 async def update_session_title(session_id: str, new_title: str = Body(..., embed=True)):
     try:
         result = await chat_crud.update_chat_session(session_id, new_title)
@@ -80,7 +80,7 @@ class UpdateChatMessageRequest(BaseModel):
     dislike_feedback: str = None
 
 
-@router.patch("/update_message/{session_id}/{message_id}")
+@router.patch("/chat/update_message/{session_id}/{message_id}")
 async def update_message(
     session_id: str,
     message_id: str,
