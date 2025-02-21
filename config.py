@@ -12,3 +12,6 @@ IMAGE_MODEL_PATH = os.path.join(BASE_PATH, "models", "image", "Janus-Pro-1B")
 
 # 정적 이미지 파일 경로 (예: 챗봇 intro 이미지)
 STATIC_IMAGE_PATH = os.path.join(BASE_PATH, "static", "images")
+
+# 생성된 이미지 저장 경로
+GENERATED_IMAGE_PATH = os.path.join(BASE_PATH, "generated_images")

@@ -10,11 +10,21 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import ChatMessageHistory
 
 # 전역 변수 (실제 서비스에서는 상태 관리를 별도 저장소로 처리하는 것이 좋습니다)
+llm = None
 store = {}  # 채팅 기록을 저장할 딕셔너리
 tasks = {}  # 진행 중인 작업을 저장하는 딕셔너리
 
 # 모델 파일 경로 설정
 # model_path = "DeepSeek-R1-GGUF/DeepSeek-R1-UD-IQ1_S/DeepSeek-R1-UD-IQ1_S-00001-of-00003.gguf"
+
+
+def get_llm(callback_handler=None):
+    global llm
+    if llm is None:
+        llm = setup_llm(callback_handler)
+    elif callback_handler is not None:
+        llm.callbacks = [callback_handler]  # 콜백 핸들러 업데이트
+    return llm
 
 
 class StreamingCallbackHandler(BaseCallbackHandler):

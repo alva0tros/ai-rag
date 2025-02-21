@@ -13,19 +13,6 @@ from app.services.chat import chat_crud
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# 전역 LLM 객체
-llm = None
-
-
-def get_llm(callback_handler):
-    # LLM 객체를 한 번만 생성하고 재사용하도록 함
-    global llm
-    if llm is None:
-        llm = chat_service.setup_llm(callback_handler)
-    else:
-        llm.callbacks = [callback_handler]  # 새 요청마다 콜백 핸들러 업데이트
-    return llm
-
 
 @router.post("/chat/chat")
 async def chat(request: Request):
@@ -69,7 +56,7 @@ async def chat(request: Request):
             # llm = chat_service.setup_llm(callback_handler)
 
             # LLM 및 체인 설정 (한 번만 생성)
-            llm_instance = get_llm(callback_handler)
+            llm_instance = chat_service.get_llm(callback_handler)
             prompt = chat_service.setup_prompt()
             chain = prompt | llm_instance | chat_service.StrOutputParser()
 
@@ -145,7 +132,9 @@ async def chat(request: Request):
             if is_new_conversation:
                 yield send_event("title_start", {"text": ""})
 
-                title = await chat_service.generate_title(llm, message, main_message)
+                title = await chat_service.generate_title(
+                    llm_instance, message, main_message
+                )
                 main_title, _ = chat_service.parse_message(title)
 
                 # 대화 이력 DB 저장
