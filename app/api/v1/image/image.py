@@ -1,18 +1,25 @@
 import logging
 import os
-import asyncio
+import io
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, UploadFile, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.services.image import image_service
 from app.services.chat import chat_service
 
-from app.services.image.image_generator import run_generate
+from fastapi.responses import JSONResponse, StreamingResponse
+from app.services.image.image_generator import (
+    ImageGenerator,
+    multimodal_understanding,
+    generate_image,
+)
+
 
 from config import STATIC_IMAGE_PATH
 
 router = APIRouter()
+image_generator = ImageGenerator()
 logger = logging.getLogger(__name__)
 
 
@@ -21,19 +28,21 @@ async def prompt(request: Request):
     # 요청 본문 파싱
     try:
         user_message = await request.json()
+        message = user_message.get("message")
+        images = generate_image(image_generator, message, None, 5.0)
+
+        def image_stream():
+            for img in images:
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                buf.seek(0)
+                yield buf.read()
+
+        return StreamingResponse(image_stream(), media_type="multipart/related")
     except Exception as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON request")
-    print("user_message : ", user_message)
-
-    # 이미지 생성 과정을 비동기적으로 실행하여 SSE 이벤트로 상태를 전송하는 제너레이터 함수
-    async def event_generator():
-        yield {"event": "start", "data": "Image generation started."}
-        loop = asyncio.get_event_loop()
-        # image_generate()는 동기 함수이므로 run_in_executor로 별도 쓰레드에서 실행
-        await loop.run_in_executor(None, run_generate)
-        yield {"event": "done", "data": "Image generation completed."}
-
-    return EventSourceResponse(event_generator())
+        raise HTTPException(
+            status_code=500, detail=f"Image generation failed: {str(e)}"
+        )
 
 
 @router.get("/image/intro")

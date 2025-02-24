@@ -1,123 +1,186 @@
-import os
 import torch
 import numpy as np
-import PIL.Image
-
-from transformers import AutoModelForCausalLM
-from third_party.Janus.janus.models import MultiModalityCausalLM, VLChatProcessor
-
-# config.py에서 모델 및 생성 이미지 경로 상수 참조
-from config import IMAGE_MODEL_PATH, GENERATED_IMAGE_PATH
-
-# 모델 경로는 config의 IMAGE_MODEL_PATH를 사용
-model_path = IMAGE_MODEL_PATH
-vl_chat_processor: VLChatProcessor = VLChatProcessor.from_pretrained(model_path)
-tokenizer = vl_chat_processor.tokenizer
-
-vl_gpt: MultiModalityCausalLM = AutoModelForCausalLM.from_pretrained(
-    model_path, trust_remote_code=True
-)
-# GPU 사용 코드가 있다면 주석 해제하고 사용
-# vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
-vl_gpt = vl_gpt.to(torch.bfloat16).eval()
+import io
+import os
+from PIL import Image
+from transformers import AutoConfig, AutoModelForCausalLM
+from third_party.Janus.janus.models import VLChatProcessor
+from typing import List
+from config import IMAGE_MODEL_PATH
 
 
-@torch.inference_mode()
-def generate(
-    mmgpt: MultiModalityCausalLM,
-    vl_chat_processor: VLChatProcessor,
-    prompt: str,
-    temperature: float = 1,
-    parallel_size: int = 1,
-    cfg_weight: float = 5,
-    image_token_num_per_image: int = 576,
-    img_size: int = 384,
-    patch_size: int = 16,
-):
-    input_ids = vl_chat_processor.tokenizer.encode(prompt)
-    input_ids = torch.LongTensor(input_ids)
+class ImageGenerator:
+    def __init__(self):
+        self.model_path = IMAGE_MODEL_PATH
+        self.cuda_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._load_model()
 
-    # 조건부와 비조건부 토큰 처리를 위해 parallel_size * 2 텐서 생성
-    tokens = torch.zeros((parallel_size * 2, len(input_ids)), dtype=torch.int)
-    for i in range(parallel_size * 2):
-        tokens[i, :] = input_ids
-        if i % 2 != 0:
-            tokens[i, 1:-1] = vl_chat_processor.pad_id
+    def _load_model(self):
+        setting = AutoConfig.from_pretrained(self.model_path)
+        language_config = setting.language_config
+        language_config._attn_implementation = "eager"
 
-    inputs_embeds = mmgpt.language_model.get_input_embeddings()(tokens)
-
-    generated_tokens = torch.zeros(
-        (parallel_size, image_token_num_per_image), dtype=torch.int
-    )
-
-    for i in range(image_token_num_per_image):
-        outputs = mmgpt.language_model.model(
-            inputs_embeds=inputs_embeds,
-            use_cache=True,
-            past_key_values=outputs.past_key_values if i != 0 else None,
+        self.vl_gpt = (
+            AutoModelForCausalLM.from_pretrained(
+                self.model_path, language_config=language_config, trust_remote_code=True
+            )
+            .to(torch.bfloat16)
+            .cuda()
+            .eval()
         )
-        hidden_states = outputs.last_hidden_state
 
-        logits = mmgpt.gen_head(hidden_states[:, -1, :])
-        logit_cond = logits[0::2, :]
-        logit_uncond = logits[1::2, :]
+        self.vl_chat_processor = VLChatProcessor.from_pretrained(self.model_path)
+        self.tokenizer = self.vl_chat_processor.tokenizer
 
-        # Classifier-Free Guidance 적용
-        logits = logit_uncond + cfg_weight * (logit_cond - logit_uncond)
-        probs = torch.softmax(logits / temperature, dim=-1)
+    @torch.inference_mode()
+    def multimodal_understanding(self, image_data, question, seed, top_p, temperature):
+        torch.cuda.empty_cache()
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        torch.cuda.manual_seed(seed)
 
-        next_token = torch.multinomial(probs, num_samples=1)
-        generated_tokens[:, i] = next_token.squeeze(dim=-1)
+        conversation = [
+            {
+                "role": "User",
+                "content": f"<image_placeholder>\n{question}",
+                "images": [image_data],
+            },
+            {"role": "Assistant", "content": ""},
+        ]
 
-        next_token = torch.cat(
-            [next_token.unsqueeze(dim=1), next_token.unsqueeze(dim=1)], dim=1
-        ).view(-1)
-        img_embeds = mmgpt.prepare_gen_img_embeds(next_token)
-        inputs_embeds = img_embeds.unsqueeze(dim=1)
+        pil_images = [Image.open(io.BytesIO(image_data))]
+        prepare_inputs = self.vl_chat_processor(
+            conversations=conversation, images=pil_images, force_batchify=True
+        ).to(self.cuda_device, dtype=torch.bfloat16)
 
-    dec = mmgpt.gen_vision_model.decode_code(
-        generated_tokens.to(dtype=torch.int),
-        shape=[parallel_size, 8, img_size // patch_size, img_size // patch_size],
-    )
-    dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
-    dec = np.clip((dec + 1) / 2 * 255, 0, 255)
+        inputs_embeds = self.vl_gpt.prepare_inputs_embeds(**prepare_inputs)
+        outputs = self.vl_gpt.language_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=prepare_inputs.attention_mask,
+            pad_token_id=self.tokenizer.eos_token_id,
+            bos_token_id=self.tokenizer.bos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+            max_new_tokens=512,
+            do_sample=False if temperature == 0 else True,
+            use_cache=True,
+            temperature=temperature,
+            top_p=top_p,
+        )
 
-    visual_img = np.zeros((parallel_size, img_size, img_size, 3), dtype=np.uint8)
-    visual_img[:, :, :] = dec
+        return self.tokenizer.decode(
+            outputs[0].cpu().tolist(), skip_special_tokens=True
+        )
 
-    # GENERATED_IMAGE_PATH에 저장 (config.py에서 설정)
-    os.makedirs(GENERATED_IMAGE_PATH, exist_ok=True)
-    for i in range(parallel_size):
-        save_path = os.path.join(GENERATED_IMAGE_PATH, f"img_{i}.jpg")
-        PIL.Image.fromarray(visual_img[i]).save(save_path)
+    def generate(
+        self,
+        input_ids,
+        width,
+        height,
+        temperature=1,
+        parallel_size=5,
+        cfg_weight=5,
+        image_token_num_per_image=576,
+        patch_size=16,
+    ):
+        torch.cuda.empty_cache()
+        tokens = torch.zeros((parallel_size * 2, len(input_ids)), dtype=torch.int).to(
+            self.cuda_device
+        )
+        for i in range(parallel_size * 2):
+            tokens[i, :] = input_ids
+            if i % 2 != 0:
+                tokens[i, 1:-1] = self.vl_chat_processor.pad_id
+        inputs_embeds = self.vl_gpt.language_model.get_input_embeddings()(tokens)
+        generated_tokens = torch.zeros(
+            (parallel_size, image_token_num_per_image), dtype=torch.int
+        ).to(self.cuda_device)
+
+        pkv = None
+        for i in range(image_token_num_per_image):
+            outputs = self.vl_gpt.language_model.model(
+                inputs_embeds=inputs_embeds, use_cache=True, past_key_values=pkv
+            )
+            pkv = outputs.past_key_values
+            hidden_states = outputs.last_hidden_state
+            logits = self.vl_gpt.gen_head(hidden_states[:, -1, :])
+            logit_cond = logits[0::2, :]
+            logit_uncond = logits[1::2, :]
+            logits = logit_uncond + cfg_weight * (logit_cond - logit_uncond)
+            probs = torch.softmax(logits / temperature, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            generated_tokens[:, i] = next_token.squeeze(dim=-1)
+            next_token = torch.cat(
+                [next_token.unsqueeze(dim=1), next_token.unsqueeze(dim=1)], dim=1
+            ).view(-1)
+            img_embeds = self.vl_gpt.prepare_gen_img_embeds(next_token)
+            inputs_embeds = img_embeds.unsqueeze(dim=1)
+
+        patches = self.vl_gpt.gen_vision_model.decode_code(
+            generated_tokens.to(dtype=torch.int),
+            shape=[parallel_size, 8, width // patch_size, height // patch_size],
+        )
+        return generated_tokens.to(dtype=torch.int), patches
+
+    def unpack(self, dec, width, height, parallel_size=5):
+        dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
+        dec = np.clip((dec + 1) / 2 * 255, 0, 255)
+        return np.zeros((parallel_size, width, height, 3), dtype=np.uint8)
+
+    @torch.inference_mode()
+    def generate_image(
+        self, prompt: str, seed: int, guidance: float
+    ) -> List[Image.Image]:
+        torch.cuda.empty_cache()
+        seed = seed if seed is not None else 12345
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        np.random.seed(seed)
+
+        width = 384
+        height = 384
+        parallel_size = 5
+
+        messages = [
+            {"role": "User", "content": prompt},
+            {"role": "Assistant", "content": ""},
+        ]
+        text = self.vl_chat_processor.apply_sft_template_for_multi_turn_prompts(
+            conversations=messages,
+            sft_format=self.vl_chat_processor.sft_format,
+            system_prompt="",
+        )
+        text += self.vl_chat_processor.image_start_tag
+        input_ids = torch.LongTensor(self.tokenizer.encode(text))
+
+        _, patches = self.generate(
+            input_ids,
+            width // 16 * 16,
+            height // 16 * 16,
+            cfg_weight=guidance,
+            parallel_size=parallel_size,
+        )
+
+        images = self.unpack(patches, width // 16 * 16, height // 16 * 16)
+        image_list = [
+            Image.fromarray(images[i]).resize((1024, 1024), Image.LANCZOS)
+            for i in range(parallel_size)
+        ]
+
+        # 추가: generated_images 폴더에 이미지 저장
+        save_dir = "generated_images"
+        os.makedirs(save_dir, exist_ok=True)  # 폴더가 없으면 생성
+        for i, img in enumerate(image_list):
+            file_path = os.path.join(save_dir, f"image_{seed}_{i}.png")
+            img.save(file_path)
+            print(f"이미지가 저장되었습니다: {file_path}")
+
+        return image_list
 
 
-def run_generate():
-    conversation = [
-        {
-            "role": "User",
-            "content": (
-                "Create a highly detailed portrait of a modern, beautiful Korean woman. "
-                "She should have a flawless, porcelain complexion with subtle natural makeup that accentuates her delicate features. "
-                "Her eyes are almond-shaped and expressive, reflecting both modern confidence and hints of traditional elegance. "
-                "Her sleek, styled hair is cut in a contemporary fashion, and she wears a chic, modern outfit with subtle nods to Korean heritage—"
-                "perhaps incorporating elements reminiscent of a modernized hanbok. "
-                "The background features a blend of urban sophistication and serene natural elements, "
-                "softly lit to enhance the subject's graceful and confident demeanor."
-            ),
-        },
-        {"role": "Assistant", "content": ""},
-    ]
-
-    sft_format = vl_chat_processor.apply_sft_template_for_multi_turn_prompts(
-        conversations=conversation,
-        sft_format=vl_chat_processor.sft_format,
-        system_prompt="",
-    )
-    prompt = sft_format + vl_chat_processor.image_start_tag
-
-    generate(vl_gpt, vl_chat_processor, prompt)
+# Helper functions
+def multimodal_understanding(generator: ImageGenerator, *args, **kwargs):
+    return generator.multimodal_understanding(*args, **kwargs)
 
 
-if __name__ == "__main__":
-    run_generate()
+def generate_image(generator: ImageGenerator, *args, **kwargs):
+    return generator.generate_image(*args, **kwargs)
