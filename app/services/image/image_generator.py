@@ -6,7 +6,7 @@ from PIL import Image
 from transformers import AutoConfig, AutoModelForCausalLM
 from third_party.Janus.janus.models import VLChatProcessor
 from typing import List
-from config import IMAGE_MODEL_PATH
+from config import IMAGE_MODEL_PATH, GENERATED_IMAGE_PATH
 
 
 class ImageGenerator:
@@ -20,13 +20,18 @@ class ImageGenerator:
         language_config = setting.language_config
         language_config._attn_implementation = "eager"
 
+        # GPU가 있으면 bfloat16 사용, 없으면 float32로 fallback
+        dtype = torch.bfloat16 if self.cuda_device == "cuda" else torch.float32
+
         self.vl_gpt = (
             AutoModelForCausalLM.from_pretrained(
                 self.model_path, language_config=language_config, trust_remote_code=True
             )
-            .to(torch.bfloat16)
-            .cuda()
+            .to(dtype)
+            .to(self.cuda_device)
             .eval()
+            # .to(torch.bfloat16)
+            # .cuda()
         )
 
         self.vl_chat_processor = VLChatProcessor.from_pretrained(self.model_path)
@@ -34,10 +39,13 @@ class ImageGenerator:
 
     @torch.inference_mode()
     def multimodal_understanding(self, image_data, question, seed, top_p, temperature):
-        torch.cuda.empty_cache()
+        # GPU 관련 메모리 정리는 GPU일 때만 실행
+        if self.cuda_device == "cuda":
+            torch.cuda.empty_cache()
         torch.manual_seed(seed)
         np.random.seed(seed)
-        torch.cuda.manual_seed(seed)
+        if self.cuda_device == "cuda":
+            torch.cuda.manual_seed(seed)
 
         conversation = [
             {
@@ -49,9 +57,12 @@ class ImageGenerator:
         ]
 
         pil_images = [Image.open(io.BytesIO(image_data))]
+
+        dtype = torch.bfloat16 if self.cuda_device == "cuda" else torch.float32
+
         prepare_inputs = self.vl_chat_processor(
             conversations=conversation, images=pil_images, force_batchify=True
-        ).to(self.cuda_device, dtype=torch.bfloat16)
+        ).to(self.cuda_device, dtype=dtype)
 
         inputs_embeds = self.vl_gpt.prepare_inputs_embeds(**prepare_inputs)
         outputs = self.vl_gpt.language_model.generate(
@@ -82,7 +93,10 @@ class ImageGenerator:
         image_token_num_per_image=576,
         patch_size=16,
     ):
-        torch.cuda.empty_cache()
+
+        if self.cuda_device == "cuda":
+            torch.cuda.empty_cache()
+
         tokens = torch.zeros((parallel_size * 2, len(input_ids)), dtype=torch.int).to(
             self.cuda_device
         )
@@ -130,10 +144,14 @@ class ImageGenerator:
     def generate_image(
         self, prompt: str, seed: int, guidance: float
     ) -> List[Image.Image]:
-        torch.cuda.empty_cache()
+
+        if self.cuda_device == "cuda":
+            torch.cuda.empty_cache()
+
         seed = seed if seed is not None else 12345
         torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
+        if self.cuda_device == "cuda":
+            torch.cuda.manual_seed(seed)
         np.random.seed(seed)
 
         width = 384
@@ -167,7 +185,7 @@ class ImageGenerator:
         ]
 
         # 추가: generated_images 폴더에 이미지 저장
-        save_dir = "generated_images"
+        save_dir = GENERATED_IMAGE_PATH
         os.makedirs(save_dir, exist_ok=True)  # 폴더가 없으면 생성
         for i, img in enumerate(image_list):
             file_path = os.path.join(save_dir, f"image_{seed}_{i}.png")
