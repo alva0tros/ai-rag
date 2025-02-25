@@ -1,14 +1,16 @@
+import asyncio
+import uuid
 import logging
 import os
 import io
+import json
 
 from fastapi import APIRouter, Request, UploadFile, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 
 from app.services.image import image_service
 from app.services.chat import chat_service
-
-from fastapi.responses import JSONResponse, StreamingResponse
 from app.services.image.image_generator import (
     ImageGenerator,
     multimodal_understanding,
@@ -16,29 +18,117 @@ from app.services.image.image_generator import (
 )
 
 
-from config import STATIC_IMAGE_PATH
+from config import STATIC_IMAGE_PATH, GENERATED_IMAGE_PATH
 
 router = APIRouter()
 image_generator = ImageGenerator()
 logger = logging.getLogger(__name__)
 
 
+# SSE로 진행률 스트리밍
+async def progress_stream(
+    prompt: str, seed: int, guidance: float, conversation_id: str
+):
+
+    # 세션별로 태스크 지정
+    task = {
+        "images": None,
+        "progress": 0.0,
+        "progress_event": asyncio.Event(),
+        "last_reported_progress": -1,
+        "generate_task": None,
+    }
+
+    async with asyncio.Lock():  # 동시 쓰기 방지
+        image_service.tasks[conversation_id] = task
+
+    # 진행률 콜백 함수
+    def update_progress(p):
+        task["progress"] = p
+        task["progress_event"].set()
+        logger.info(f"Conversation {conversation_id}: Progress updated to {p}%")
+        print("Progress : ", task["progress"])
+
+    image_generator = ImageGenerator(progress_callback=update_progress)
+    logger.info(f"Conversation {conversation_id}: ImageGenerator initialized")
+
+    async def generate_images():
+        try:
+            task["images"] = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: generate_image(image_generator, prompt, seed, guidance)
+            )
+            logger.info(f"Conversation {conversation_id}: Image generation completed")
+        except Exception as e:
+            logger.error(
+                f"Conversation {conversation_id}: Image generation failed - {str(e)}"
+            )
+            raise
+
+    async def event_generator():
+
+        # 이미지 생성 작업을 백그라운드로 실행
+        task["generate_task"] = asyncio.create_task(generate_images())
+        logger.info(f"Conversation {conversation_id}: Generate task started")
+
+        # 진행률 스트리밍 (1% 단위로만 전송)
+        while task["progress"] < 100.0:
+            await task["progress_event"].wait()
+            current_progress = round(
+                task["progress"], 0
+            )  # 소수점 버림으로 1% 단위로 조정
+            if current_progress > task["last_reported_progress"]:  # 1% 증가 시에만 전송
+                task["last_reported_progress"] = current_progress
+                yield {"event": "progress", "data": f"{current_progress}"}
+            task["progress_event"].clear()  # 이벤트 리셋
+            await asyncio.sleep(0.1)  # 0.1초마다 진행률 확인
+
+        # 이미지 생성 완료 대기
+        await task["generate_task"]
+
+        # 최종 100% 전송 보장
+        if task["last_reported_progress"] != 100:
+            yield {"event": "progress", "data": "100"}
+
+        # 이미지 저장 및 URL 생성
+        image_urls = []
+        save_dir = GENERATED_IMAGE_PATH
+        os.makedirs(save_dir, exist_ok=True)
+
+        for i, img in enumerate(task["images"]):
+            file_name = f"image_{conversation_id}_{i}.png"
+            file_path = os.path.join(save_dir, file_name)
+            img.save(file_path, format="PNG")
+            image_url = f"/static/images/{file_name}"
+            image_urls.append(image_url)
+
+        yield {
+            "event": "image_urls",
+            "data": json.dumps({"urls": image_urls}),
+            "id": f"image_{conversation_id}",
+        }
+
+    return EventSourceResponse(event_generator())
+
+
 @router.post("/image/prompt")
 async def prompt(request: Request):
-    # 요청 본문 파싱
     try:
         user_message = await request.json()
         message = user_message.get("message")
-        images = generate_image(image_generator, message, None, 5.0)
+        user_id = user_message.get("user_id")
+        conversation_id = user_message.get("conversation_id")
+        message_id = user_message.get("message_id")
 
-        def image_stream():
-            for img in images:
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                buf.seek(0)
-                yield buf.read()
+        # conversation_id가 없는 경우 새로운 ID 생성
+        is_new_conversation = not conversation_id
+        if is_new_conversation:
+            conversation_id = str(uuid.uuid4())
 
-        return StreamingResponse(image_stream(), media_type="multipart/related")
+        # 응답 큐 생성
+        queue = asyncio.Queue()
+
+        print(f"Received prompt: {user_message}")
+        return await progress_stream(message, None, 5.0, conversation_id)
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Image generation failed: {str(e)}"

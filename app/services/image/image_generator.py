@@ -5,17 +5,20 @@ import os
 from PIL import Image
 from transformers import AutoConfig, AutoModelForCausalLM
 from third_party.Janus.janus.models import VLChatProcessor
-from typing import List
-from config import IMAGE_MODEL_PATH, GENERATED_IMAGE_PATH
+from typing import List, Callable
+from config import IMAGE_MODEL_PATH
 
 
 class ImageGenerator:
-    def __init__(self):
+    def __init__(self, progress_callback: Callable[[float], None] = None):
         self.model_path = IMAGE_MODEL_PATH
         self.cuda_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.progress_callback = progress_callback  # 진행률 콜백
         self._load_model()
 
     def _load_model(self):
+        if self.cuda_device == "cuda":
+            torch.cuda.empty_cache()  # 캐시 정리 추가
         setting = AutoConfig.from_pretrained(self.model_path)
         language_config = setting.language_config
         language_config._attn_implementation = "eager"
@@ -110,6 +113,8 @@ class ImageGenerator:
         ).to(self.cuda_device)
 
         pkv = None
+        last_progress = 0  # 마지막으로 보고된 진행률 (1% 단위)
+
         for i in range(image_token_num_per_image):
             outputs = self.vl_gpt.language_model.model(
                 inputs_embeds=inputs_embeds, use_cache=True, past_key_values=pkv
@@ -129,6 +134,12 @@ class ImageGenerator:
             img_embeds = self.vl_gpt.prepare_gen_img_embeds(next_token)
             inputs_embeds = img_embeds.unsqueeze(dim=1)
 
+            # 진행률 계산 및 콜백 호출
+            progress = (i + 1) / image_token_num_per_image * 100
+
+            if self.progress_callback:
+                self.progress_callback(progress)
+
         patches = self.vl_gpt.gen_vision_model.decode_code(
             generated_tokens.to(dtype=torch.int),
             shape=[parallel_size, 8, width // patch_size, height // patch_size],
@@ -137,8 +148,9 @@ class ImageGenerator:
 
     def unpack(self, dec, width, height, parallel_size=5):
         dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
-        dec = np.clip((dec + 1) / 2 * 255, 0, 255)
-        return np.zeros((parallel_size, width, height, 3), dtype=np.uint8)
+        dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
+        # return np.zeros((parallel_size, width, height, 3), dtype=np.uint8)
+        return dec
 
     @torch.inference_mode()
     def generate_image(
@@ -160,6 +172,10 @@ class ImageGenerator:
 
         messages = [
             {"role": "User", "content": prompt},
+            # {
+            #     "role": "User",
+            #     "content": "Draw a cute puppy with fluffy fur, sitting on a soft carpet in a cozy living room. The puppy has big round eyes, a wagging tail, and wears a small red collar. Add details like sunlight streaming through the window, creating a warm and cheerful atmosphere.",
+            # },
             {"role": "Assistant", "content": ""},
         ]
         text = self.vl_chat_processor.apply_sft_template_for_multi_turn_prompts(
@@ -179,18 +195,12 @@ class ImageGenerator:
         )
 
         images = self.unpack(patches, width // 16 * 16, height // 16 * 16)
-        image_list = [
-            Image.fromarray(images[i]).resize((1024, 1024), Image.LANCZOS)
-            for i in range(parallel_size)
-        ]
-
-        # 추가: generated_images 폴더에 이미지 저장
-        save_dir = GENERATED_IMAGE_PATH
-        os.makedirs(save_dir, exist_ok=True)  # 폴더가 없으면 생성
-        for i, img in enumerate(image_list):
-            file_path = os.path.join(save_dir, f"image_{seed}_{i}.png")
-            img.save(file_path)
-            print(f"이미지가 저장되었습니다: {file_path}")
+        image_list = []
+        for i in range(parallel_size):
+            img_array = images[i]  # (height, width, 3) shape이어야 함
+            img = Image.fromarray(img_array)
+            img_resized = img.resize((1024, 1024), Image.LANCZOS)
+            image_list.append(img_resized)
 
         return image_list
 
