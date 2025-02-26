@@ -8,6 +8,7 @@ from config import BASE_PATH
 
 app = FastAPI()
 static_path = os.path.join(BASE_PATH, "static")
+generated_path = os.path.join(BASE_PATH, "generated")
 
 # CORS 설정
 app.add_middleware(
@@ -26,3 +27,4 @@ app.include_router(image.router, prefix="/api/v1")
 
 # static 폴더 전체를 마운트합니다.
 app.mount("/static", StaticFiles(directory=static_path), name="static")
+app.mount("/generated", StaticFiles(directory=generated_path), name="generated")

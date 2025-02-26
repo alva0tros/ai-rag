@@ -19,6 +19,11 @@ class ImageGenerator:
     def _load_model(self):
         if self.cuda_device == "cuda":
             torch.cuda.empty_cache()  # 캐시 정리 추가
+            # 기존 모델 해제
+            if hasattr(self, "vl_gpt"):
+                del self.vl_gpt
+                torch.cuda.empty_cache()
+
         setting = AutoConfig.from_pretrained(self.model_path)
         language_config = setting.language_config
         language_config._attn_implementation = "eager"
@@ -26,19 +31,29 @@ class ImageGenerator:
         # GPU가 있으면 bfloat16 사용, 없으면 float32로 fallback
         dtype = torch.bfloat16 if self.cuda_device == "cuda" else torch.float32
 
-        self.vl_gpt = (
-            AutoModelForCausalLM.from_pretrained(
-                self.model_path, language_config=language_config, trust_remote_code=True
+        try:
+            self.vl_gpt = (
+                AutoModelForCausalLM.from_pretrained(
+                    self.model_path,
+                    language_config=language_config,
+                    trust_remote_code=True,
+                )
+                .to(dtype)
+                .to(self.cuda_device)
+                .eval()
             )
-            .to(dtype)
-            .to(self.cuda_device)
-            .eval()
-            # .to(torch.bfloat16)
-            # .cuda()
-        )
+            print("모델 로드 및 디바이스 이동 완료")
+        except Exception as e:
+            print(f"모델 로드 실패: {str(e)}")
+            raise
 
-        self.vl_chat_processor = VLChatProcessor.from_pretrained(self.model_path)
-        self.tokenizer = self.vl_chat_processor.tokenizer
+        try:
+            self.vl_chat_processor = VLChatProcessor.from_pretrained(self.model_path)
+            self.tokenizer = self.vl_chat_processor.tokenizer
+            print("VLChatProcessor 및 토크나이저 로드 완료")
+        except Exception as e:
+            print(f"VLChatProcessor 로드 실패: {str(e)}")
+            raise
 
     @torch.inference_mode()
     def multimodal_understanding(self, image_data, question, seed, top_p, temperature):
@@ -91,7 +106,7 @@ class ImageGenerator:
         width,
         height,
         temperature=1,
-        parallel_size=5,
+        parallel_size=3,
         cfg_weight=5,
         image_token_num_per_image=576,
         patch_size=16,
@@ -168,14 +183,16 @@ class ImageGenerator:
 
         width = 384
         height = 384
-        parallel_size = 5
+        parallel_size = 3
 
         messages = [
-            {"role": "User", "content": prompt},
-            # {
-            #     "role": "User",
-            #     "content": "Draw a cute puppy with fluffy fur, sitting on a soft carpet in a cozy living room. The puppy has big round eyes, a wagging tail, and wears a small red collar. Add details like sunlight streaming through the window, creating a warm and cheerful atmosphere.",
-            # },
+            # {"role": "User", "content": prompt},
+            {
+                "role": "User",
+                "content": """AI
+Bot
+Draw a playful puppy with big, bright eyes and a wagging tail. The puppy should be sitting on a soft grassy field under a clear blue sky dotted with fluffy white clouds. Its fur is shiny and smooth, and it's wearing a small red bow around its neck. In the background, there are colorful flowers swaying gently in the breeze.""",
+            },
             {"role": "Assistant", "content": ""},
         ]
         text = self.vl_chat_processor.apply_sft_template_for_multi_turn_prompts(
@@ -199,7 +216,7 @@ class ImageGenerator:
         for i in range(parallel_size):
             img_array = images[i]  # (height, width, 3) shape이어야 함
             img = Image.fromarray(img_array)
-            img_resized = img.resize((1024, 1024), Image.LANCZOS)
+            img_resized = img.resize((384, 384), Image.LANCZOS)
             image_list.append(img_resized)
 
         return image_list
