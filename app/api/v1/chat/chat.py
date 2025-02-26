@@ -3,6 +3,7 @@ import uuid
 import json
 import time
 import logging
+import torch
 
 from fastapi import APIRouter, Request, HTTPException
 from sse_starlette.sse import EventSourceResponse
@@ -52,6 +53,11 @@ async def chat(request: Request):
         think_end_time = None
 
         try:
+            # LLM 실행 전 GPU 메모리 정리
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info("GPU 메모리 정리 완료")
+
             # LLM 및 체인 설정
             # llm = chat_service.setup_llm(callback_handler)
 

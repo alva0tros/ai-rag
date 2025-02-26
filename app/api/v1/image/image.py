@@ -23,7 +23,7 @@ from app.services.image.image_generator import (
 from config import STATIC_IMAGE_PATH, GENERATED_IMAGE_PATH
 
 router = APIRouter()
-image_generator = ImageGenerator()
+# image_generator = ImageGenerator()
 logger = logging.getLogger(__name__)
 
 
@@ -133,6 +133,9 @@ async def prompt(request: Request):
             # conversation_id = str(uuid.uuid4())
             conversation_id = nanoid(size=12)
             print(f"Generated new conversation_id: {conversation_id}")
+
+        # ChatOllama 초기화
+        chat_service.reset_llm()
 
         print(f"Received prompt: {user_message}")
         return await progress_stream(

@@ -1,5 +1,7 @@
 import re
 import asyncio
+import torch
+import subprocess
 from langchain_ollama import ChatOllama
 from langchain_community.chat_models import ChatLlamaCpp
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -16,6 +18,33 @@ tasks = {}  # 진행 중인 작업을 저장하는 딕셔너리
 
 # 모델 파일 경로 설정
 # model_path = "DeepSeek-R1-GGUF/DeepSeek-R1-UD-IQ1_S/DeepSeek-R1-UD-IQ1_S-00001-of-00003.gguf"
+
+
+# GPU 리소스 해제 함수
+def reset_llm():
+    global llm
+    if llm is not None:
+        try:
+            # 1. LLM 인스턴스 해제
+            llm = None
+            print("ChatOllama 인스턴스를 None으로 설정")
+
+            # 2. GPU 캐시 정리
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print("GPU 캐시 정리 완료")
+
+            # 3. Ollama 프로세스 종료 (선택적, 필요 시 주석 해제)
+            try:
+                subprocess.run(["sudo", "pkill", "-f", "ollama"], check=False)
+                print("Ollama 프로세스 종료 완료")
+            except Exception as e:
+                print(f"Ollama 프로세스 종료 중 오류: {e}")
+
+        except Exception as e:
+            print(f"GPU 리소스 해제 중 오류: {e}")
+    else:
+        print("LLM 인스턴스가 이미 해제된 상태입니다")
 
 
 def get_llm(callback_handler=None):
@@ -38,7 +67,9 @@ class StreamingCallbackHandler(BaseCallbackHandler):
 # LLM 설정 함수
 def setup_llm(callback_handler):
     return ChatOllama(
-        model="deepseek-r1:1.5b",
+        model="phi4:latest",
+        # model="deepseek-r1:32b",
+        # model="deepseek-r1:1.5b",
         # model="deepseek-r1:7b-qwen-distill-q4_K_M",
         # model="qwen2.5:latest",
         # model="deepseek-r1:7b",

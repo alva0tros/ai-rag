@@ -14,15 +14,14 @@ class ImageGenerator:
         self.model_path = IMAGE_MODEL_PATH
         self.cuda_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.progress_callback = progress_callback  # 진행률 콜백
+        self.vl_gpt = None
+        self.vl_chat_processor = None
+        self.tokenizer = None
         self._load_model()
 
     def _load_model(self):
         if self.cuda_device == "cuda":
             torch.cuda.empty_cache()  # 캐시 정리 추가
-            # 기존 모델 해제
-            if hasattr(self, "vl_gpt"):
-                del self.vl_gpt
-                torch.cuda.empty_cache()
 
         setting = AutoConfig.from_pretrained(self.model_path)
         language_config = setting.language_config
@@ -54,6 +53,15 @@ class ImageGenerator:
         except Exception as e:
             print(f"VLChatProcessor 로드 실패: {str(e)}")
             raise
+
+    def unload_model(self):
+        """모델을 메모리에서 해제"""
+        if self.vl_gpt is not None:
+            del self.vl_gpt
+            self.vl_gpt = None
+        if self.cuda_device == "cuda":
+            torch.cuda.empty_cache()  # GPU 메모리 정리
+        print("모델 언로드 완료")
 
     @torch.inference_mode()
     def multimodal_understanding(self, image_data, question, seed, top_p, temperature):
@@ -171,55 +179,55 @@ class ImageGenerator:
     def generate_image(
         self, prompt: str, seed: int, guidance: float
     ) -> List[Image.Image]:
+        try:
+            if self.cuda_device == "cuda":
+                torch.cuda.empty_cache()
 
-        if self.cuda_device == "cuda":
-            torch.cuda.empty_cache()
+            seed = seed if seed is not None else 12345
+            torch.manual_seed(seed)
+            if self.cuda_device == "cuda":
+                torch.cuda.manual_seed(seed)
+            np.random.seed(seed)
 
-        seed = seed if seed is not None else 12345
-        torch.manual_seed(seed)
-        if self.cuda_device == "cuda":
-            torch.cuda.manual_seed(seed)
-        np.random.seed(seed)
+            width = 384
+            height = 384
+            parallel_size = 3
 
-        width = 384
-        height = 384
-        parallel_size = 3
+            messages = [
+                # {"role": "User", "content": prompt},
+                {
+                    "role": "User",
+                    "content": "Draw a playful puppy with big, bright eyes and a wagging tail. The puppy should be sitting on a soft grassy field under a clear blue sky dotted with fluffy white clouds. Its fur is shiny and smooth, and it's wearing a small red bow around its neck. In the background, there are colorful flowers swaying gently in the breeze.",
+                },
+                {"role": "Assistant", "content": ""},
+            ]
+            text = self.vl_chat_processor.apply_sft_template_for_multi_turn_prompts(
+                conversations=messages,
+                sft_format=self.vl_chat_processor.sft_format,
+                system_prompt="",
+            )
+            text += self.vl_chat_processor.image_start_tag
+            input_ids = torch.LongTensor(self.tokenizer.encode(text))
 
-        messages = [
-            # {"role": "User", "content": prompt},
-            {
-                "role": "User",
-                "content": """AI
-Bot
-Draw a playful puppy with big, bright eyes and a wagging tail. The puppy should be sitting on a soft grassy field under a clear blue sky dotted with fluffy white clouds. Its fur is shiny and smooth, and it's wearing a small red bow around its neck. In the background, there are colorful flowers swaying gently in the breeze.""",
-            },
-            {"role": "Assistant", "content": ""},
-        ]
-        text = self.vl_chat_processor.apply_sft_template_for_multi_turn_prompts(
-            conversations=messages,
-            sft_format=self.vl_chat_processor.sft_format,
-            system_prompt="",
-        )
-        text += self.vl_chat_processor.image_start_tag
-        input_ids = torch.LongTensor(self.tokenizer.encode(text))
+            _, patches = self.generate(
+                input_ids,
+                width // 16 * 16,
+                height // 16 * 16,
+                cfg_weight=guidance,
+                parallel_size=parallel_size,
+            )
 
-        _, patches = self.generate(
-            input_ids,
-            width // 16 * 16,
-            height // 16 * 16,
-            cfg_weight=guidance,
-            parallel_size=parallel_size,
-        )
+            images = self.unpack(patches, width // 16 * 16, height // 16 * 16)
+            image_list = []
+            for i in range(parallel_size):
+                img_array = images[i]  # (height, width, 3) shape이어야 함
+                img = Image.fromarray(img_array)
+                img_resized = img.resize((384, 384), Image.LANCZOS)
+                image_list.append(img_resized)
 
-        images = self.unpack(patches, width // 16 * 16, height // 16 * 16)
-        image_list = []
-        for i in range(parallel_size):
-            img_array = images[i]  # (height, width, 3) shape이어야 함
-            img = Image.fromarray(img_array)
-            img_resized = img.resize((384, 384), Image.LANCZOS)
-            image_list.append(img_resized)
-
-        return image_list
+            return image_list
+        finally:
+            self.unload_model()
 
 
 # Helper functions
