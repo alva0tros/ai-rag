@@ -19,34 +19,6 @@ tasks = {}  # 진행 중인 작업을 저장하는 딕셔너리
 # 모델 파일 경로 설정
 # model_path = "DeepSeek-R1-GGUF/DeepSeek-R1-UD-IQ1_S/DeepSeek-R1-UD-IQ1_S-00001-of-00003.gguf"
 
-
-# GPU 리소스 해제 함수
-def reset_llm():
-    global llm
-    if llm is not None:
-        try:
-            # 1. LLM 인스턴스 해제
-            llm = None
-            print("ChatOllama 인스턴스를 None으로 설정")
-
-            # 2. GPU 캐시 정리
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                print("GPU 캐시 정리 완료")
-
-            # 3. Ollama 프로세스 종료 (선택적, 필요 시 주석 해제)
-            try:
-                subprocess.run(["sudo", "pkill", "-f", "ollama"], check=False)
-                print("Ollama 프로세스 종료 완료")
-            except Exception as e:
-                print(f"Ollama 프로세스 종료 중 오류: {e}")
-
-        except Exception as e:
-            print(f"GPU 리소스 해제 중 오류: {e}")
-    else:
-        print("LLM 인스턴스가 이미 해제된 상태입니다")
-
-
 def get_llm(callback_handler=None):
     global llm
     if llm is None:
