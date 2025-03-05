@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 
 # 로컬 DB
-DATABASE_URL = "postgresql+asyncpg://postgres:admin@localhost:5432/chatbot"
+# DATABASE_URL = "postgresql+asyncpg://postgres:admin@localhost:5432/chatbot"
 
 # 외부 DB
 # DATABASE_URL = "postgresql+asyncpg://admin:admin@smango.iptime.org:5432/chatbot"
