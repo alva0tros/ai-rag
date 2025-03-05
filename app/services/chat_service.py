@@ -39,9 +39,9 @@ def get_llm(callback_handler=None):
 # LLM 설정 함수
 def setup_llm(callback_handler):
     return ChatOllama(
-        # model="phi4:latest",
+        model="phi4:latest",
         # model="deepseek-r1:32b",
-        model="deepseek-r1:1.5b",
+        # model="deepseek-r1:1.5b",
         # model="deepseek-r1:7b-qwen-distill-q4_K_M",
         # model="qwen2.5:latest",
         # model="deepseek-r1:7b",

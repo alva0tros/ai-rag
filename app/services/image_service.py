@@ -87,20 +87,26 @@ class ImageService:
             # GPU가 있으면 bfloat16 사용, 없으면 float32로 fallback
             dtype = torch.bfloat16 if self.cuda_device == "cuda" else torch.float32
 
-            # 모델 로드 시 메모리 효율성 설정 추가
-            device_map = "auto" if self.cuda_device == "cuda" else None
-
-            self.vl_gpt = AutoModelForCausalLM.from_pretrained(
-                self.model_path,
-                language_config=language_config,
-                trust_remote_code=True,
-                device_map=device_map,  # 자동 device 매핑 활성화
-                low_cpu_mem_usage=True,  # CPU 메모리 사용 최적화
-            ).to(dtype)
-
-            # CUDA 사용 시에만 .cuda() 호출
+            # 모델 로드 방식을 GPU 사용 여부에 따라 결정
             if self.cuda_device == "cuda":
-                self.vl_gpt = self.vl_gpt.cuda()
+                # GPU 사용 시 device_map="auto"만 사용하고 .cuda() 호출 안 함
+                self.vl_gpt = AutoModelForCausalLM.from_pretrained(
+                    self.model_path,
+                    language_config=language_config,
+                    trust_remote_code=True,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                    torch_dtype=dtype,
+                )
+            else:
+                # CPU 사용 시 device_map 없이 로드
+                self.vl_gpt = AutoModelForCausalLM.from_pretrained(
+                    self.model_path,
+                    language_config=language_config,
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                    torch_dtype=dtype,
+                )
 
             self.vl_gpt = self.vl_gpt.eval()  # 추론 모드 설정
 
@@ -217,7 +223,13 @@ class ImageService:
         # 입력 준비
         prepare_inputs = self.vl_chat_processor(
             conversations=conversation, images=pil_images, force_batchify=True
-        ).to(self.cuda_device, dtype=dtype)
+        )
+
+        # device를 직접 이동하지 않고 to()에 전달
+        if self.cuda_device == "cuda":
+            prepare_inputs = prepare_inputs.to(device=self.cuda_device, dtype=dtype)
+        else:
+            prepare_inputs = prepare_inputs.to(dtype=dtype)
 
         try:
             # 모델 추론
@@ -271,7 +283,7 @@ class ImageService:
             # 입력 처리
             tokens = torch.zeros((parallel_size * 2, len(input_ids)), dtype=torch.int)
             if self.cuda_device == "cuda":
-                tokens = tokens.cuda()
+                tokens = tokens.to(device=self.cuda_device)
             # tokens = torch.zeros((parallel_size * 2, len(input_ids)), dtype=torch.int).to(
             #     self.cuda_device
             # )
@@ -279,6 +291,7 @@ class ImageService:
                 tokens[i, :] = input_ids
                 if i % 2 != 0:
                     tokens[i, 1:-1] = self.vl_chat_processor.pad_id
+                    
             inputs_embeds = self.vl_gpt.language_model.get_input_embeddings()(tokens)
 
             generated_tokens = torch.zeros(
