@@ -1,31 +1,13 @@
 import re
 import asyncio
-import torch
-import subprocess
 from langchain_ollama import ChatOllama
 from langchain_community.chat_models import ChatLlamaCpp
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
+
 from langchain_community.chat_message_histories import ChatMessageHistory
-
-# 전역 변수 (실제 서비스에서는 상태 관리를 별도 저장소로 처리하는 것이 좋습니다)
-llm = None
-store = {}  # 채팅 기록을 저장할 딕셔너리
-tasks = {}  # 진행 중인 작업을 저장하는 딕셔너리
-
-# 모델 파일 경로 설정
-# model_path = "DeepSeek-R1-GGUF/DeepSeek-R1-UD-IQ1_S/DeepSeek-R1-UD-IQ1_S-00001-of-00003.gguf"
-
-def get_llm(callback_handler=None):
-    global llm
-    if llm is None:
-        llm = setup_llm(callback_handler)
-    elif callback_handler is not None:
-        llm.callbacks = [callback_handler]  # 콜백 핸들러 업데이트
-    return llm
 
 
 class StreamingCallbackHandler(BaseCallbackHandler):
@@ -36,12 +18,30 @@ class StreamingCallbackHandler(BaseCallbackHandler):
         await self.queue.put(token)
 
 
+# 전역 변수 (실제 서비스에서는 상태 관리를 별도 저장소로 처리하는 것이 좋습니다)
+llm = None
+store = {}  # 채팅 기록을 저장할 딕셔너리
+tasks = {}  # 진행 중인 작업을 저장하는 딕셔너리
+
+# 모델 파일 경로 설정
+# model_path = "DeepSeek-R1-GGUF/DeepSeek-R1-UD-IQ1_S/DeepSeek-R1-UD-IQ1_S-00001-of-00003.gguf"
+
+
+def get_llm(callback_handler=None):
+    global llm
+    if llm is None:
+        llm = setup_llm(callback_handler)
+    elif callback_handler is not None:
+        llm.callbacks = [callback_handler]  # 콜백 핸들러 업데이트
+    return llm
+
+
 # LLM 설정 함수
 def setup_llm(callback_handler):
     return ChatOllama(
-        model="phi4:latest",
+        # model="phi4:latest",
         # model="deepseek-r1:32b",
-        # model="deepseek-r1:1.5b",
+        model="deepseek-r1:1.5b",
         # model="deepseek-r1:7b-qwen-distill-q4_K_M",
         # model="qwen2.5:latest",
         # model="deepseek-r1:7b",
@@ -49,6 +49,7 @@ def setup_llm(callback_handler):
         temperature=0.5,
         num_predict=2048,
         num_ctx=8192,
+        num_thread=8,
         callbacks=[callback_handler],
     )
     # return ChatLlamaCpp(

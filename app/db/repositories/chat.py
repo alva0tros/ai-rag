@@ -2,8 +2,8 @@ import logging
 import datetime
 from sqlalchemy import select, delete
 
-from app.infrastructure.crud_db.session import async_session
-from app.infrastructure.crud_db.chat_models import ChatSession, ChatMessage
+from app.db.session import async_session
+from app.db.entities.chat import ChatSession, ChatMessage
 
 
 logger = logging.getLogger(__name__)

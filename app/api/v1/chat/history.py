@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Body
 from pydantic import BaseModel
-from app.services.chat import chat_crud
+from app.db.repositories import chat
 
 
 router = APIRouter()
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 @router.get("/chat/sessions/{user_id}")
 async def get_all_sessions(user_id):
     try:
-        chat_sessions = await chat_crud.get_all_chat_sessions(user_id)
+        chat_sessions = await chat.get_all_chat_sessions(user_id)
         # sessions_data = [
         #     {
         #         "session_id": str(session.session_id),
@@ -29,7 +29,7 @@ async def get_all_sessions(user_id):
 
 @router.get("/chat/messages/{session_id}")
 async def get_messages(session_id, limit=100, offset=0):
-    messages = await chat_crud.get_chat_messages(session_id, limit, offset)
+    messages = await chat.get_chat_messages(session_id, limit, offset)
     messages_data = [
         {
             "session_id": str(msg.session_id),
@@ -50,7 +50,7 @@ async def get_messages(session_id, limit=100, offset=0):
 @router.delete("/chat/delete_session/{session_id}")
 async def delete_session(session_id: str):
     try:
-        await chat_crud.delete_chat_session(session_id)
+        await chat.delete_chat_session(session_id)
         return {"message": f"Session {session_id} and its messages have been deleted."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -59,7 +59,7 @@ async def delete_session(session_id: str):
 @router.patch("/chat/update_session/{session_id}")
 async def update_session_title(session_id: str, new_title: str = Body(..., embed=True)):
     try:
-        result = await chat_crud.update_chat_session(session_id, new_title)
+        result = await chat.update_chat_session(session_id, new_title)
 
         if not result:
             raise HTTPException(status_code=404, detail="Chat session not found")
@@ -87,7 +87,7 @@ async def update_message(
     request: UpdateChatMessageRequest = Body(...),
 ):
     try:
-        result = await chat_crud.update_chat_message(
+        result = await chat.update_chat_message(
             session_id,
             message_id,
             liked=request.liked,

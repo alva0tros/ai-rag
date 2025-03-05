@@ -1,29 +1,17 @@
 import asyncio
 
-# import uuid
 import logging
 import os
-import io
 import json
 
 from nanoid import generate as nanoid
-from fastapi import APIRouter, Request, UploadFile, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, Request, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from app.services.image import image_service
-from app.services.chat import chat_service
-from app.services.image.image_generator import (
-    ImageGenerator,
-    multimodal_understanding,
-    generate_image,
-)
-
-
-from config import STATIC_IMAGE_PATH, GENERATED_IMAGE_PATH
+from app.services.image_service import image_service, generate_image
+from app.core.config import settings
 
 router = APIRouter()
-# image_generator = ImageGenerator()
 logger = logging.getLogger(__name__)
 
 
@@ -55,12 +43,21 @@ async def progress_stream(
         task["progress_event"].set()
         logger.info(f"Conversation {conversation_id}: Progress updated to {p}%")
 
-    image_generator = ImageGenerator(progress_callback=update_progress)
+    # 이미지 서비스 콜백 설정
+    image_service.progress_callback = update_progress
+
+    # try:
+    #     image_service = ImageService(progress_callback=update_progress)
+    # except Exception as e:
+    #     logger.error(f"ImageGenerator 초기화 실패: {str(e)}")
+    #     raise HTTPException(
+    #         status_code=500, detail=f"이미지 생성기 초기화 실패: {str(e)}"
+    #     )
 
     async def generate_images():
         try:
             task["images"] = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: generate_image(image_generator, prompt, seed, guidance)
+                None, lambda: generate_image(prompt, seed, guidance)
             )
         except Exception as e:
             logger.error(
@@ -85,31 +82,39 @@ async def progress_stream(
             task["progress_event"].clear()  # 이벤트 리셋
             await asyncio.sleep(0.1)  # 0.1초마다 진행률 확인
 
-        # 이미지 생성 완료 대기
-        await task["generate_task"]
+        try:
+            # 이미지 생성 완료 대기
+            await task["generate_task"]
 
-        # 최종 100% 전송 보장
-        if task["last_reported_progress"] != 100:
-            yield {"event": "progress", "data": "100"}
+            # 최종 100% 전송 보장
+            if task["last_reported_progress"] != 100:
+                yield {"event": "progress", "data": "100"}
 
-        # 이미지 저장 및 URL 생성
-        image_urls = []
-        save_dir = os.path.join(
-            GENERATED_IMAGE_PATH, str(user_id), conversation_id, message_id
-        )
-        os.makedirs(save_dir, exist_ok=True)
+            # 이미지 저장 및 URL 생성
+            image_urls = []
+            save_dir = os.path.join(
+                settings.GENERATED_IMAGE_PATH, str(user_id), conversation_id, message_id
+            )
+            os.makedirs(save_dir, exist_ok=True)
 
-        for i, img in enumerate(task["images"]):
-            file_name = f"img{i}.png"
-            file_path = os.path.join(save_dir, file_name)
-            img.save(file_path, format="PNG")
-            image_url = f"/generated/images/{user_id}/{conversation_id}/{message_id}/{file_name}"
-            image_urls.append(image_url)
+            for i, img in enumerate(task["images"]):
+                file_name = f"img{i}.png"
+                file_path = os.path.join(save_dir, file_name)
+                img.save(file_path, format="PNG")
+                image_url = f"/generated/images/{user_id}/{conversation_id}/{message_id}/{file_name}"
+                image_urls.append(image_url)
 
-        yield {
-            "event": "image",
-            "data": json.dumps({"image_urls": image_urls}),
-        }
+            yield {
+                "event": "image",
+                "data": json.dumps({"image_urls": image_urls}),
+            }
+        except Exception as e:
+            logger.error(f"Error in event generator: {str(e)}")
+            yield {"event": "error", "data": str(e)}
+        finally:
+            # 작업 정리 및 메모리 해제
+            if conversation_id in image_service.tasks:
+                del image_service.tasks[conversation_id]
 
     return EventSourceResponse(event_generator())
 
@@ -132,10 +137,6 @@ async def prompt(request: Request):
         if is_new_conversation:
             # conversation_id = str(uuid.uuid4())
             conversation_id = nanoid(size=12)
-            print(f"Generated new conversation_id: {conversation_id}")
-
-        # ChatOllama 초기화
-        chat_service.reset_llm()
 
         print(f"Received prompt: {user_message}")
         return await progress_stream(
@@ -150,7 +151,7 @@ async def prompt(request: Request):
 @router.get("/image/intro")
 async def get_intro_images():
 
-    if not os.path.isdir(STATIC_IMAGE_PATH):
+    if not os.path.isdir(settings.STATIC_IMAGE_PATH):
         raise HTTPException(
             status_code=404, detail="Static images directory not found."
         )
@@ -159,7 +160,7 @@ async def get_intro_images():
     valid_extensions = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
     image_files = [
         file
-        for file in os.listdir(STATIC_IMAGE_PATH)
+        for file in os.listdir(settings.STATIC_IMAGE_PATH)
         if file.lower().endswith(valid_extensions)
     ]
 

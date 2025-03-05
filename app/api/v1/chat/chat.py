@@ -3,19 +3,20 @@ import uuid
 import json
 import time
 import logging
-import torch
 
 from fastapi import APIRouter, Request, HTTPException
 from sse_starlette.sse import EventSourceResponse
-from app.services.chat import chat_service
-from app.services.chat import chat_crud
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from app.services import chat_service
+from app.db.repositories import chat as chat_crud
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.post("/chat/chat")
+@router.post("/chat/message")
 async def chat(request: Request):
 
     # 요청 본문 파싱
@@ -57,9 +58,9 @@ async def chat(request: Request):
             # LLM 및 체인 설정 (한 번만 생성)
             llm_instance = chat_service.get_llm(callback_handler)
             prompt = chat_service.setup_prompt()
-            chain = prompt | llm_instance | chat_service.StrOutputParser()
+            chain = prompt | llm_instance | StrOutputParser()
 
-            with_message_history = chat_service.RunnableWithMessageHistory(
+            with_message_history = RunnableWithMessageHistory(
                 chain,
                 chat_service.get_chat_history,
                 input_messages_key="message",

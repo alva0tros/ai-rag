@@ -1,67 +1,96 @@
 import torch
 import numpy as np
 import io
-import os
 from PIL import Image
 from transformers import AutoConfig, AutoModelForCausalLM
 from third_party.Janus.janus.models import VLChatProcessor
 from typing import List, Callable
-from config import IMAGE_MODEL_PATH
+from app.core.config import settings
 
 
-class ImageGenerator:
+class ImageService:
+    _instance = None
+    _is_initialized = False
+
+    # 싱글톤 패턴 적용
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(ImageService, cls).__new__(cls)
+            cls._instance.store = {}  # 채팅 기록을 저장할 딕셔너리
+            cls._instance.tasks = {}  # 진행 중인 작업을 저장하는 딕셔너리
+        return cls._instance
+
     def __init__(self, progress_callback: Callable[[float], None] = None):
-        self.model_path = IMAGE_MODEL_PATH
+        if self._is_initialized:
+            if progress_callback is not None:
+                self.progress_callback = progress_callback
+            return
+
+        self.model_path = settings.IMAGE_MODEL_PATH
         self.cuda_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.progress_callback = progress_callback  # 진행률 콜백
         self.vl_gpt = None
         self.vl_chat_processor = None
         self.tokenizer = None
+
+        # 모델 로드
         self._load_model()
+        self._is_initialized = True
 
     def _load_model(self):
+        """모델 로드 함수"""
         if self.cuda_device == "cuda":
             torch.cuda.empty_cache()  # 캐시 정리 추가
 
-        setting = AutoConfig.from_pretrained(self.model_path)
-        language_config = setting.language_config
-        language_config._attn_implementation = "eager"
-
-        # GPU가 있으면 bfloat16 사용, 없으면 float32로 fallback
-        dtype = torch.bfloat16 if self.cuda_device == "cuda" else torch.float32
-
         try:
+            # 모델 설정 최적화
+            setting = AutoConfig.from_pretrained(self.model_path)
+            language_config = setting.language_config
+            language_config._attn_implementation = "eager"
+
+            # GPU가 있으면 bfloat16 사용, 없으면 float32로 fallback
+            dtype = torch.bfloat16 if self.cuda_device == "cuda" else torch.float32
+
             self.vl_gpt = (
                 AutoModelForCausalLM.from_pretrained(
                     self.model_path,
                     language_config=language_config,
                     trust_remote_code=True,
+                    # device_map="auto",  # 자동 device 매핑
+                    # offload_folder="temp_offload_folder",  # 오프로드 폴더 지정
                 )
                 .to(dtype)
                 .to(self.cuda_device)
                 .eval()
             )
-            print("모델 로드 및 디바이스 이동 완료")
-        except Exception as e:
-            print(f"모델 로드 실패: {str(e)}")
-            raise
 
-        try:
+            # 모델 추론 속도 개선
+            if self.cuda_device == "cuda":
+                torch.backends.cudnn.benchmark = True
+
             self.vl_chat_processor = VLChatProcessor.from_pretrained(self.model_path)
             self.tokenizer = self.vl_chat_processor.tokenizer
-            print("VLChatProcessor 및 토크나이저 로드 완료")
+            print("모델 로드 완료")
         except Exception as e:
             print(f"VLChatProcessor 로드 실패: {str(e)}")
             raise
 
     def unload_model(self):
-        """모델을 메모리에서 해제"""
+        """모델을 메모리에서 해제하되, 인스턴스는 유지"""
         if self.vl_gpt is not None:
             del self.vl_gpt
             self.vl_gpt = None
         if self.cuda_device == "cuda":
             torch.cuda.empty_cache()  # GPU 메모리 정리
+        self._is_initialized = False
         print("모델 언로드 완료")
+
+    def clear_task(self, conversation_id: str):
+        """특정 대화의 태스크 제거"""
+        if conversation_id in self.tasks:
+            del self.tasks[conversation_id]
+            return True
+        return False
 
     @torch.inference_mode()
     def multimodal_understanding(self, image_data, question, seed, top_p, temperature):
@@ -136,7 +165,6 @@ class ImageGenerator:
         ).to(self.cuda_device)
 
         pkv = None
-        last_progress = 0  # 마지막으로 보고된 진행률 (1% 단위)
 
         for i in range(image_token_num_per_image):
             outputs = self.vl_gpt.language_model.model(
@@ -226,14 +254,23 @@ class ImageGenerator:
                 image_list.append(img_resized)
 
             return image_list
+        except Exception as e:
+            print(f"이미지 생성 중 오류 발생: {str(e)}")
+            raise
         finally:
-            self.unload_model()
+            # 메모리 정리
+            if self.cuda_device == "cuda":
+                torch.cuda.empty_cache()
+
+
+# 이미지 서비스 싱글톤 인스턴스 생성
+image_service = ImageService()
 
 
 # Helper functions
-def multimodal_understanding(generator: ImageGenerator, *args, **kwargs):
-    return generator.multimodal_understanding(*args, **kwargs)
+def multimodal_understanding(*args, **kwargs):
+    return image_service.multimodal_understanding(*args, **kwargs)
 
 
-def generate_image(generator: ImageGenerator, *args, **kwargs):
-    return generator.generate_image(*args, **kwargs)
+def generate_image(*args, **kwargs):
+    return image_service.generate_image(*args, **kwargs)
