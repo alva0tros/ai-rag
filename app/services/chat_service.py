@@ -1,5 +1,6 @@
 import re
 import asyncio
+import logging
 from functools import lru_cache
 from collections import deque
 from langchain_ollama import ChatOllama
@@ -12,6 +13,9 @@ from langchain_community.chat_message_histories import ChatMessageHistory
 from functools import lru_cache
 
 
+# 로깅 설정
+logger = logging.getLogger(__name__)
+
 class StreamingCallbackHandler(BaseCallbackHandler):
     def __init__(self, queue: asyncio.Queue):
         self.queue = queue
@@ -23,6 +27,7 @@ class StreamingCallbackHandler(BaseCallbackHandler):
 # 전역 변수 (실제 서비스에서는 상태 관리를 별도 저장소로 처리하는 것이 좋습니다)
 store = {}  # 채팅 기록을 저장할 딕셔너리
 tasks = {}  # 진행 중인 작업을 저장하는 딕셔너리
+model_instances = {}
 
 # 요청 대기열 및 처리 중인 작업 수 관리
 request_queue = deque()
@@ -36,37 +41,54 @@ async def process_queue():
     global active_requests
     
     while request_queue:
-        if active_requests < MAX_CONCURRENT_REQUESTS:
-            # 대기열에서 요청 가져오기
+        # 여러 요청을 동시에 처리하도록 gather 사용
+        tasks_to_process = []
+        conversation_ids = []
+
+        # 대기열에서 최대 MAX_CONCURRENT_REQUESTS 개수만큼 작업 가져오기
+        while request_queue and len(tasks_to_process) < MAX_CONCURRENT_REQUESTS:
             task_info = request_queue.popleft()
-            conversation_id = task_info["conversation_id"]
-            
-            # 작업 시작
-            active_requests += 1
+            tasks_to_process.append(task_info["task"])
+            conversation_ids.append(task_info["conversation_id"])
+
+        if tasks_to_process:
+            active_requests += len(tasks_to_process)
             try:
-                # 여기서 실제 LLM 요청 처리
-                await task_info["task"]
+                # 여러 태스크를 동시에 비동기 실행
+                logger.info(f"Processing {len(tasks_to_process)} tasks simultaneously")
+                await asyncio.gather(*tasks_to_process)
+            except Exception as e:
+                logger.error(f"Error processing tasks: {str(e)}")
             finally:
-                active_requests -= 1
+                active_requests -= len(tasks_to_process)
+                # 태스크 처리 완료 후 세션별 리소스 정리
+                for conv_id in conversation_ids:
+                    tasks.pop(conv_id, None)
         else:
-            # 동시 요청 수 초과 시 잠시 대기
             await asyncio.sleep(0.1)
 
 # 요청 추가 함수
 async def add_request(task, conversation_id):
+    """새 요청을 큐에 추가하고 처리 시작"""
     request_queue.append({
         "task": task,
         "conversation_id": conversation_id
     })
-    
+
     # 큐 처리 시작 (이미 실행 중이 아니라면)
+    logger.info(f"Added request for conversation {conversation_id} to queue")
     asyncio.create_task(process_queue())
 
-@lru_cache(maxsize=32)  # 최대 32개의 LLM 인스턴스 캐싱
 def get_llm(callback_handler=None, session_id=None):
-    """세션 별로 독립된 LLM 인스턴스 제공"""
-    llm = setup_llm(callback_handler)
-    return llm
+    """세션별로 독립된 LLM 인스턴스 제공 (세션별 모델 캐싱)"""
+    if session_id not in model_instances:
+        logger.info(f"Creating new LLM instance for session {session_id}")
+        model_instances[session_id] = setup_llm(callback_handler)
+    elif callback_handler is not None:
+        # 기존 인스턴스에 콜백 핸들러만 업데이트
+        model_instances[session_id].callbacks = [callback_handler]
+    
+    return model_instances[session_id]
 
 # def get_llm(callback_handler=None, session_id=None):
 #     global llm
@@ -108,6 +130,17 @@ def setup_llm(callback_handler):
     #     callbacks=[callback_handler],
     # )
 
+# 세션별 리소스 정리 함수
+def cleanup_session_resources(session_id):
+    """세션 종료 시 관련 리소스 정리"""
+    # 모델 인스턴스 제거
+    if session_id in model_instances:
+        logger.info(f"Cleaning up model instance for session {session_id}")
+        del model_instances[session_id]
+    
+    # 채팅 기록 정리 (선택 사항)
+    if session_id in store:
+        del store[session_id]
 
 # 프롬프트 설정 함수
 def setup_prompt():

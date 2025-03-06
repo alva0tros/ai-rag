@@ -199,4 +199,8 @@ async def stop_chat(request: Request):
 
     task = chat_service.tasks[conversation_id]
     task.cancel()  # 작업 취소
+
+    # 세션 리소스 정리 함수 호출 추가
+    chat_service.cleanup_session_resources(conversation_id)
+
     return {"message": f"Task for session {conversation_id} has been cancelled."}
