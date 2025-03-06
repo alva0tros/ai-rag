@@ -133,7 +133,6 @@ class ImageService:
     def unload_model(self):
         """모델을 메모리에서 해제하되, 인스턴스는 유지"""
         if not self.model_loaded:
-            logger.info("Model not loaded, nothing to unload")
             return
 
         logger.info("Unloading model from memory")
@@ -157,7 +156,10 @@ class ImageService:
                 self.tokenizer = None
 
             # 철저한 메모리 정리
-            self._clear_gpu_memory()
+            # self._clear_gpu_memory()
+            # 강제로 메모리 정리
+            torch.cuda.empty_cache()
+            gc.collect()
 
             self.model_loaded = False
             logger.info("Model unloaded successfully")

@@ -6,8 +6,7 @@ from app.api.v1.chat import chat, history as chat_history
 from app.api.v1.image import image
 from app.core.config import settings
 
-
-print("BASE_PATH : ", settings.BASE_PATH)
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 app = FastAPI()
 static_path = os.path.join(settings.BASE_PATH, "static")

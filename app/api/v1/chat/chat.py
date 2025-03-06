@@ -56,7 +56,7 @@ async def chat(request: Request):
         try:
 
             # LLM 및 체인 설정 (한 번만 생성)
-            llm_instance = chat_service.get_llm(callback_handler)
+            llm_instance = chat_service.get_llm(callback_handler, conversation_id)
             prompt = chat_service.setup_prompt()
             chain = prompt | llm_instance | StrOutputParser()
 
@@ -78,7 +78,10 @@ async def chat(request: Request):
                     config={"configurable": {"session_id": conversation_id}},
                 )
             )
-            print("conversation_id : ", conversation_id)
+        
+            # 작업 큐에 추가
+            await chat_service.add_request(task, conversation_id)
+
             chat_service.tasks[conversation_id] = task  # 작업을 저장
 
             # 첫 요청이면 conversation_id 반환
