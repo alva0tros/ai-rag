@@ -1,15 +1,13 @@
 import re
 import asyncio
-from functools import lru_cache
-from collections import deque
 from langchain_ollama import ChatOllama
 from langchain_community.chat_models import ChatLlamaCpp
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.chat_history import BaseChatMessageHistory
+
 from langchain_community.chat_message_histories import ChatMessageHistory
-from functools import lru_cache
 
 
 class StreamingCallbackHandler(BaseCallbackHandler):
@@ -21,60 +19,21 @@ class StreamingCallbackHandler(BaseCallbackHandler):
 
 
 # 전역 변수 (실제 서비스에서는 상태 관리를 별도 저장소로 처리하는 것이 좋습니다)
+llm = None
 store = {}  # 채팅 기록을 저장할 딕셔너리
 tasks = {}  # 진행 중인 작업을 저장하는 딕셔너리
-
-# 요청 대기열 및 처리 중인 작업 수 관리
-request_queue = deque()
-active_requests = 0
-MAX_CONCURRENT_REQUESTS = 10  # 최대 동시 처리 요청 
 
 # 모델 파일 경로 설정
 # model_path = "DeepSeek-R1-GGUF/DeepSeek-R1-UD-IQ1_S/DeepSeek-R1-UD-IQ1_S-00001-of-00003.gguf"
 
-async def process_queue():
-    global active_requests
-    
-    while request_queue:
-        if active_requests < MAX_CONCURRENT_REQUESTS:
-            # 대기열에서 요청 가져오기
-            task_info = request_queue.popleft()
-            conversation_id = task_info["conversation_id"]
-            
-            # 작업 시작
-            active_requests += 1
-            try:
-                # 여기서 실제 LLM 요청 처리
-                await task_info["task"]
-            finally:
-                active_requests -= 1
-        else:
-            # 동시 요청 수 초과 시 잠시 대기
-            await asyncio.sleep(0.1)
 
-# 요청 추가 함수
-async def add_request(task, conversation_id):
-    request_queue.append({
-        "task": task,
-        "conversation_id": conversation_id
-    })
-    
-    # 큐 처리 시작 (이미 실행 중이 아니라면)
-    asyncio.create_task(process_queue())
-
-@lru_cache(maxsize=32)  # 최대 32개의 LLM 인스턴스 캐싱
-def get_llm(callback_handler=None, session_id=None):
-    """세션 별로 독립된 LLM 인스턴스 제공"""
-    llm = setup_llm(callback_handler)
+def get_llm(callback_handler=None):
+    global llm
+    if llm is None:
+        llm = setup_llm(callback_handler)
+    elif callback_handler is not None:
+        llm.callbacks = [callback_handler]  # 콜백 핸들러 업데이트
     return llm
-
-# def get_llm(callback_handler=None, session_id=None):
-#     global llm
-#     if llm is None:
-#         llm = setup_llm(callback_handler)
-#     elif callback_handler is not None:
-#         llm.callbacks = [callback_handler]  # 콜백 핸들러 업데이트
-#     return llm
 
 
 # LLM 설정 함수
@@ -152,6 +111,7 @@ def get_chat_history(session_id: str) -> BaseChatMessageHistory:
 #     )
 #     return title.strip()
 
+
 async def generate_title(llm: ChatOllama, user_message: str) -> str:
     title_prompt = ChatPromptTemplate.from_messages(
         [
@@ -177,9 +137,7 @@ async def generate_title(llm: ChatOllama, user_message: str) -> str:
     # )
 
     chain = title_prompt | llm | StrOutputParser()
-    title = await chain.ainvoke(
-        {"user_message": user_message}
-    )
+    title = await chain.ainvoke({"user_message": user_message})
     return title.strip()
 
 

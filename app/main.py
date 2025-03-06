@@ -6,8 +6,6 @@ from app.api.v1.chat import chat, history as chat_history
 from app.api.v1.image import image
 from app.core.config import settings
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 app = FastAPI()
 static_path = os.path.join(settings.BASE_PATH, "static")
 generated_path = os.path.join(settings.BASE_PATH, "generated")
@@ -24,7 +22,6 @@ app.add_middleware(
 # API 라우터 등록 (예: /api/v1/chat, /api/v1/stop)
 app.include_router(chat.router, prefix=settings.API_PREFIX)
 app.include_router(chat_history.router, prefix=settings.API_PREFIX)
-
 app.include_router(image.router, prefix=settings.API_PREFIX)
 
 # static 폴더 전체를 마운트합니다.
