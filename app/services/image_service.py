@@ -5,7 +5,7 @@ import gc
 import logging
 from PIL import Image
 from transformers import AutoConfig, AutoModelForCausalLM
-from third_party.Janus.janus.models import VLChatProcessor
+from src.janus.janus.models import VLChatProcessor
 from typing import List, Callable
 from contextlib import contextmanager
 from app.core.config import settings

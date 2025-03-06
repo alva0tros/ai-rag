@@ -39,7 +39,8 @@ def get_llm(callback_handler=None):
 # LLM 설정 함수
 def setup_llm(callback_handler):
     return ChatOllama(
-        model="phi4:latest",
+        model="phi4:14b-q8_0",
+        # model="phi4:latest",
         # model="deepseek-r1:32b",
         # model="deepseek-r1:1.5b",
         # model="deepseek-r1:7b-qwen-distill-q4_K_M",
@@ -89,18 +90,41 @@ def get_chat_history(session_id: str) -> BaseChatMessageHistory:
     return store[session_id]
 
 
-async def generate_title(llm: ChatOllama, user_message: str, ai_response: str) -> str:
+# async def generate_title(llm: ChatOllama, user_message: str, ai_response: str) -> str:
+#     title_prompt = ChatPromptTemplate.from_messages(
+#         [
+#             (
+#                 "system",
+#                 """다음 대화 내용을 간결하게 요약하여 제목을 생성하세요.
+#                    - 제목은 10단어 이내로 작성하세요.
+#                    - 반드시 한국어만 사용
+#                    - 추론 과정(<think>내용)은 무시
+#                    - 핵심 키워드 위주로 구성""",
+#             ),
+#             ("human", "사용자: {user_message}\nAI: {ai_response}"),
+#         ]
+#     )
+
+#     chain = title_prompt | llm | StrOutputParser()
+#     title = await chain.ainvoke(
+#         {"user_message": user_message, "ai_response": ai_response}
+#     )
+#     return title.strip()
+
+async def generate_title(llm: ChatOllama, user_message: str) -> str:
     title_prompt = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
                 """다음 대화 내용을 간결하게 요약하여 제목을 생성하세요.
-                   - 제목은 10단어 이내로 작성하세요.
+                   - 제목은 1문장으로 작성하세요.
+                   - 제목은 5단어 이내로 작성하세요.
+                   - 최대한 짧게 작성하세요.
                    - 반드시 한국어만 사용
                    - 추론 과정(<think>내용)은 무시
                    - 핵심 키워드 위주로 구성""",
             ),
-            ("human", "사용자: {user_message}\nAI: {ai_response}"),
+            ("human", "사용자: {user_message}"),
         ]
     )
 
@@ -113,7 +137,7 @@ async def generate_title(llm: ChatOllama, user_message: str, ai_response: str) -
 
     chain = title_prompt | llm | StrOutputParser()
     title = await chain.ainvoke(
-        {"user_message": user_message, "ai_response": ai_response}
+        {"user_message": user_message}
     )
     return title.strip()
 

@@ -132,9 +132,10 @@ async def chat(request: Request):
             if is_new_conversation:
                 yield send_event("title_start", {"text": ""})
 
-                title = await chat_service.generate_title(
-                    llm_instance, message, main_message
-                )
+                # title = await chat_service.generate_title(
+                #     llm_instance, message, main_message
+                # )
+                title = await chat_service.generate_title(llm_instance, message)
                 main_title, _ = chat_service.parse_message(title)
 
                 # 대화 이력 DB 저장
