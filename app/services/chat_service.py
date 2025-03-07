@@ -1,169 +1,337 @@
-import re
-import asyncio
-from langchain_ollama import ChatOllama
-from langchain_community.chat_models import ChatLlamaCpp
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.chat_history import BaseChatMessageHistory
+"""
+채팅 서비스의 통합 및 상위 로직을 담당하는 모듈
 
+이 모듈은 채팅 기록 관리, 스토리지 관리, 리소스 관리, 대화 처리 등
+상위 수준의 기능을 담당하는 클래스들과 이를 통합하는 ChatService 클래스를 포함합니다.
+"""
+
+import asyncio
+import logging
+from typing import Dict, Any, Optional, AsyncGenerator
+
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import ChatMessageHistory
 
+from app.services.chat_core import (
+    StreamingCallbackHandler,
+    LLMManager,
+    PromptManager,
+    MessageProcessor,
+    EventManager,
+)
+from app.db.repositories import chat as chat_crud
 
-class StreamingCallbackHandler(BaseCallbackHandler):
-    def __init__(self, queue: asyncio.Queue):
-        self.queue = queue
+# ==========================================================
+# 기본 설정
+# ==========================================================
 
-    async def on_llm_new_token(self, token: str, **kwargs) -> None:
-        await self.queue.put(token)
+# 로거 설정
+logger = logging.getLogger(__name__)
 
-
-# 전역 변수 (실제 서비스에서는 상태 관리를 별도 저장소로 처리하는 것이 좋습니다)
-llm = None
-store = {}  # 채팅 기록을 저장할 딕셔너리
-tasks = {}  # 진행 중인 작업을 저장하는 딕셔너리
-
-# 모델 파일 경로 설정
-# model_path = "DeepSeek-R1-GGUF/DeepSeek-R1-UD-IQ1_S/DeepSeek-R1-UD-IQ1_S-00001-of-00003.gguf"
-
-
-def get_llm(callback_handler=None):
-    global llm
-    if llm is None:
-        llm = setup_llm(callback_handler)
-    elif callback_handler is not None:
-        llm.callbacks = [callback_handler]  # 콜백 핸들러 업데이트
-    return llm
+# ==========================================================
+# 채팅 기록 관리 클래스
+# ==========================================================
 
 
-# LLM 설정 함수
-def setup_llm(callback_handler):
-    return ChatOllama(
-        model="phi4:14b-q8_0",
-        # model="phi4:latest",
-        # model="deepseek-r1:32b",
-        # model="deepseek-r1:1.5b",
-        # model="deepseek-r1:7b-qwen-distill-q4_K_M",
-        # model="qwen2.5:latest",
-        # model="deepseek-r1:7b",
-        # model="qwen2.5:latest",
-        temperature=0.5,
-        num_predict=2048,
-        num_ctx=8192,
-        num_thread=8,
-        callbacks=[callback_handler],
-    )
-    # return ChatLlamaCpp(
-    #     model_path=model_path,
-    #     temperature=0.6,
-    #     max_tokens=8192,
-    #     n_ctx=32768,
-    #     n_gpu_layers=33,      # L40S GPU에 최적화된 GPU 오프로딩: 약 16개 레이어
-    #     f16_kv=True,          # FP16 키-값 캐시 사용으로 메모리 효율 향상
-    #     n_threads=16,
-    #     n_batch=512,          # CUDA 연산 최적화를 위한 배치 크기
-    #     seed=3407,
-    #     stop=["<|User|>", "<|Assistant|>"],
-    #     callbacks=[callback_handler],
-    # )
+class ChatHistoryManager:
+    """채팅 기록을 관리하는 클래스"""
+
+    def __init__(self):
+        self.store = {}  # 채팅 기록을 저장할 딕셔너리
+
+    def get_chat_history(self, session_id: str) -> BaseChatMessageHistory:
+        """
+        채팅 기록을 가져오는 함수
+        """
+        if session_id not in self.store:
+            self.store[session_id] = ChatMessageHistory()
+        return self.store[session_id]
+
+    def clear_chat_history(self, session_id: str) -> None:
+        """
+        채팅 기록을 삭제하는 함수
+        """
+        if session_id in self.store:
+            del self.store[session_id]
+            logger.info(f"Chat history for session {session_id} removed")
 
 
-# 프롬프트 설정 함수
-def setup_prompt():
-    return ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """당신은 친절하고 전문적인 AI 어시스턴트입니다. 모든 답변은 반드시 한국어로 작성해야 합니다. 
-                   한자, 영어 또는 기타 언어를 포함하지 말고 오직 한국어만 사용하세요.
-                   질문과 관련성이 높은 내용만 답변하고 추측된 내용을 생성하지 마세요.""",
-            ),
-            MessagesPlaceholder(variable_name="history"),
-            ("human", "{message}"),
-        ]
-    )
+# ==========================================================
+# 저장 관리 클래스
+# ==========================================================
 
 
-def get_chat_history(session_id: str) -> BaseChatMessageHistory:
-    if session_id not in store:
-        store[session_id] = ChatMessageHistory()
-    return store[session_id]
+class StorageManager:
+    """데이터 저장 관련 기능을 제공하는 클래스"""
+
+    async def generate_and_save_title(
+        self,
+        llm_instance,
+        message: str,
+        conversation_id: str,
+        user_id: Optional[int],
+        prompt_manager: PromptManager,
+        message_processor: MessageProcessor,
+    ) -> str:
+        """
+        대화 제목을 생성하고 저장합니다.
+
+        Args:
+            llm_instance: LLM 인스턴스
+            message: 사용자 메시지
+            conversation_id: 대화 세션 ID
+            user_id: 사용자 ID
+            prompt_manager: 프롬프트 관리자
+            message_processor: 메시지 처리기
+
+        Returns:
+            생성된 제목
+        """
+        title = await prompt_manager.generate_title(llm_instance, message)
+        main_title, _ = message_processor.parse_message(title)
+
+        try:
+            await chat_crud.create_chat_session(conversation_id, main_title, user_id)
+        except Exception as db_e:
+            logger.exception("DB 저장 실패 (세션 저장): %s", db_e)
+            # 제목 생성은 성공했으므로 에러를 다시 발생시키지 않고 계속 진행
+
+        return title
+
+    async def save_chat_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        user_message: str,
+        main_message: str,
+        think_message: str,
+        think_time: int,
+    ) -> None:
+        """
+        채팅 메시지를 데이터베이스에 저장합니다.
+
+        Args:
+            conversation_id: 대화 세션 ID
+            message_id: 메시지 ID
+            user_message: 사용자 메시지
+            main_message: 주요 응답 메시지
+            think_message: 생각 메시지
+            think_time: 생각 시간 (초)
+        """
+        try:
+            await chat_crud.create_chat_message(
+                conversation_id,
+                message_id,
+                user_message,
+                main_message,
+                think_message,
+                think_time,
+            )
+        except Exception as db_e:
+            logger.exception("DB 저장 실패 (메시지 저장): %s", db_e)
+            # 메시지 저장 실패는 치명적이지 않으므로 경고만 로깅하고 계속 진행
 
 
-# async def generate_title(llm: ChatOllama, user_message: str, ai_response: str) -> str:
-#     title_prompt = ChatPromptTemplate.from_messages(
-#         [
-#             (
-#                 "system",
-#                 """다음 대화 내용을 간결하게 요약하여 제목을 생성하세요.
-#                    - 제목은 10단어 이내로 작성하세요.
-#                    - 반드시 한국어만 사용
-#                    - 추론 과정(<think>내용)은 무시
-#                    - 핵심 키워드 위주로 구성""",
-#             ),
-#             ("human", "사용자: {user_message}\nAI: {ai_response}"),
-#         ]
-#     )
-
-#     chain = title_prompt | llm | StrOutputParser()
-#     title = await chain.ainvoke(
-#         {"user_message": user_message, "ai_response": ai_response}
-#     )
-#     return title.strip()
+# ==========================================================
+# 리소스 관리 클래스
+# ==========================================================
 
 
-async def generate_title(llm: ChatOllama, user_message: str) -> str:
-    title_prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """다음 대화 내용을 간결하게 요약하여 제목을 생성하세요.
-                   - 제목은 1문장으로 작성하세요.
-                   - 제목은 5단어 이내로 작성하세요.
-                   - 최대한 짧게 작성하세요.
-                   - 반드시 한국어만 사용
-                   - 추론 과정(<think>내용)은 무시
-                   - 핵심 키워드 위주로 구성""",
-            ),
-            ("human", "사용자: {user_message}"),
-        ]
-    )
+class ResourceManager:
+    """리소스 관리 관련 기능을 제공하는 클래스"""
 
-    # llm = ChatOllama(
-    #     # model="qwen2.5:latest",
-    #     model="deepseek-r1:1.5b",
-    #     temperature=0.5,
-    #     num_predict=50,  # 짧은 제목 생성을 위한 설정
-    # )
+    def __init__(
+        self, tasks: Dict[str, asyncio.Task], history_manager: ChatHistoryManager
+    ):
+        self.tasks = tasks
+        self.history_manager = history_manager
 
-    chain = title_prompt | llm | StrOutputParser()
-    title = await chain.ainvoke({"user_message": user_message})
-    return title.strip()
+    def cleanup_session_resources(self, conversation_id: str) -> None:
+        """
+        세션 리소스를 정리합니다.
+
+        Args:
+            conversation_id: 대화 세션 ID
+        """
+        if conversation_id in self.tasks:
+            task = self.tasks.pop(conversation_id, None)
+            if task:
+                logger.info(f"Task for session {conversation_id} removed")
+
+        self.history_manager.clear_chat_history(conversation_id)
 
 
-def parse_message(message: str):
-    """
-    메시지를 <think>...</think> 태그를 기준으로 분리
-    """
-    think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL)
-    think_match = think_pattern.search(message)
+# ==========================================================
+# 대화 처리 클래스
+# ==========================================================
 
-    if think_match:
-        think_message = think_match.group(1).strip()
-        main_message = think_pattern.sub("", message).strip()  # <think> 태그 제거
-    else:
-        think_message = ""
-        main_message = message.strip()
 
-    # # 태그 제거를 위한 정규식 패턴 강화
-    # think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL | re.IGNORECASE)
+class ConversationHandler:
+    """대화 처리 관련 기능을 제공하는 클래스"""
 
-    # # 여러 개의 <think> 태그 처리
-    # think_matches = think_pattern.findall(message)
-    # think_message = "\n".join(think_matches).strip()
+    def __init__(
+        self,
+        llm_manager: LLMManager,
+        prompt_manager: PromptManager,
+        history_manager: ChatHistoryManager,
+        message_processor: MessageProcessor,
+        event_manager: EventManager,
+        storage_manager: StorageManager,
+        tasks: Dict[str, asyncio.Task],
+    ):
+        self.llm_manager = llm_manager
+        self.prompt_manager = prompt_manager
+        self.history_manager = history_manager
+        self.message_processor = message_processor
+        self.event_manager = event_manager
+        self.storage_manager = storage_manager
+        self.tasks = tasks
 
-    # # 메인 메시지 정제
-    # main_message = think_pattern.sub("", message)
-    # main_message = re.sub(r"\s+", " ", main_message).strip()  # 연속 공백 제거
+    async def handle_chat_conversation(
+        self,
+        queue: asyncio.Queue,
+        message: str,
+        conversation_id: str,
+        message_id: str,
+        user_id: Optional[int],
+        is_new_conversation: bool,
+    ) -> AsyncGenerator:
+        """
+        채팅 대화를 처리하는 메인 함수
 
-    return main_message, think_message
+        Args:
+            queue: 토큰을 받을 비동기 큐
+            message: 사용자 메시지
+            conversation_id: 대화 세션 ID
+            message_id: 메시지 ID
+            user_id: 사용자 ID
+            is_new_conversation: 새 대화 여부
+
+        Yields:
+            SSE 이벤트
+        """
+        callback_handler = StreamingCallbackHandler(queue)
+
+        # LLM 및 체인 설정
+        llm_instance = self.llm_manager.get_llm(callback_handler)
+        prompt = self.prompt_manager.setup_prompt()
+        chain = prompt | llm_instance | StrOutputParser()
+
+        with_message_history = RunnableWithMessageHistory(
+            chain,
+            self.history_manager.get_chat_history,
+            input_messages_key="message",
+            history_messages_key="history",
+        )
+
+        # 비동기로 체인 실행
+        task = asyncio.create_task(
+            with_message_history.ainvoke(
+                {"message": message},
+                config={"configurable": {"session_id": conversation_id}},
+            )
+        )
+
+        # 세션 작업 저장
+        self.tasks[conversation_id] = task
+
+        # 첫 요청이면 conversation_id 반환
+        if is_new_conversation:
+            yield await self.event_manager.create_sse_event(
+                "conversation_id", {"text": conversation_id}
+            )
+
+        # 응답 스트리밍 처리
+        ai_response = ""
+        last_state = None
+
+        # 토큰을 실시간으로 스트리밍하여 클라이언트에 전송
+        async for event, response, state in self.event_manager.stream_tokens(
+            queue, task, self.message_processor
+        ):
+            ai_response = response
+            last_state = state
+            yield event
+
+        # 완료 이벤트 전송
+        yield await self.event_manager.create_sse_event("done", {"text": ""})
+
+        # think 시간 계산
+        think_time = await self.message_processor.calculate_think_time(
+            last_state
+            if last_state
+            else {"think_start_time": None, "think_end_time": None}
+        )
+
+        # main_message와 think_message 분리
+        main_message, think_message = self.message_processor.parse_message(ai_response)
+
+        # 첫 대화일 경우 제목 생성
+        if is_new_conversation:
+            yield await self.event_manager.create_sse_event("title_start", {"text": ""})
+
+            title = await self.storage_manager.generate_and_save_title(
+                llm_instance,
+                message,
+                conversation_id,
+                user_id,
+                self.prompt_manager,
+                self.message_processor,
+            )
+
+            # 채팅 메시지 저장
+            await self.storage_manager.save_chat_message(
+                conversation_id,
+                message_id,
+                message,
+                main_message,
+                think_message,
+                think_time,
+            )
+
+            yield await self.event_manager.create_sse_event("title", {"text": title})
+        else:
+            # 기존 대화인 경우 메시지만 저장
+            await self.storage_manager.save_chat_message(
+                conversation_id,
+                message_id,
+                message,
+                main_message,
+                think_message,
+                think_time,
+            )
+
+
+# ==========================================================
+# 통합 서비스 클래스
+# ==========================================================
+
+
+class ChatService:
+    """채팅 서비스를 총괄하는 클래스"""
+
+    def __init__(self):
+        # 전역 변수 설정
+        self.tasks = {}  # 진행 중인 작업을 저장하는 딕셔너리
+
+        # 각 관리자 클래스 초기화
+        self.llm_manager = LLMManager()
+        self.prompt_manager = PromptManager()
+        self.history_manager = ChatHistoryManager()
+        self.message_processor = MessageProcessor()
+        self.event_manager = EventManager()
+        self.storage_manager = StorageManager()
+        self.resource_manager = ResourceManager(self.tasks, self.history_manager)
+
+        # 대화 처리 핸들러 초기화
+        self.conversation_handler = ConversationHandler(
+            self.llm_manager,
+            self.prompt_manager,
+            self.history_manager,
+            self.message_processor,
+            self.event_manager,
+            self.storage_manager,
+            self.tasks,
+        )
