@@ -90,7 +90,8 @@ class StorageManager:
             생성된 제목
         """
         title = await prompt_manager.generate_title(llm_instance, message)
-        main_title, _ = message_processor.parse_message(title)
+        main_title = title
+        # main_title, _ = message_processor.parse_message(title)
 
         try:
             await chat_crud.create_chat_session(conversation_id, main_title, user_id)

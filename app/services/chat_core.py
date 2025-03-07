@@ -10,12 +10,13 @@ import asyncio
 import json
 import time
 import logging
-from typing import Dict, Any, Optional, Tuple, List, AsyncGenerator
-
+import yake
+from typing import Dict, Any, Tuple, AsyncGenerator
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.callbacks import BaseCallbackHandler
+
+# from langchain_core.output_parsers import StrOutputParser
 
 # ==========================================================
 # 기본 설정
@@ -126,27 +127,88 @@ class PromptManager:
 
     async def generate_title(self, llm_instance, user_message: str) -> str:
         """
-        대화 제목을 생성하는 함수
+        대화 제목을 생성하는 함수 - Yake 라이브러리 사용
         """
-        title_prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    """다음 대화 내용을 간결하게 요약하여 제목을 생성하세요.
-                       - 제목은 1문장으로 작성하세요.
-                       - 제목은 5단어 이내로 작성하세요.
-                       - 최대한 짧게 작성하세요.
-                       - 반드시 한국어만 사용
-                       - 추론 과정(<think>내용)은 무시
-                       - 핵심 키워드 위주로 구성""",
-                ),
-                ("human", "사용자: {user_message}"),
-            ]
-        )
+        # 특수문자와 과도한 공백 제거
+        cleaned_message = re.sub(r"\s+", " ", user_message).strip()
 
-        chain = title_prompt | llm_instance | StrOutputParser()
-        title = await chain.ainvoke({"user_message": user_message})
-        return title.strip()
+        # <think> 태그가 있다면 제거
+        think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL)
+        cleaned_message = think_pattern.sub("", cleaned_message).strip()
+
+        # 메시지가 너무 짧으면 그대로 반환
+        if len(cleaned_message) < 10:
+            return cleaned_message[:30]
+
+        try:
+            # Yake 키워드 추출기 초기화 (언어 자동 감지)
+            kw_extractor = yake.KeywordExtractor(
+                lan="ko",  # 기본값으로 설정하나 자동 감지 기능이 있음
+                n=2,  # 1-2개 단어로 구성된 키워드 추출
+                dedupLim=0.7,  # 중복 제거 임계값
+                top=3,  # 상위 3개 키워드 추출
+                features=None,
+            )
+
+            # 키워드 추출
+            keywords = kw_extractor.extract_keywords(cleaned_message)
+
+            # 키워드가 추출되었는지 확인
+            if keywords:
+                # 점수가 낮을수록 중요도가 높음 (Yake 특성)
+                sorted_keywords = sorted(keywords, key=lambda x: x[1])
+
+                # 상위 2개 키워드 사용
+                top_keywords = [kw[0] for kw in sorted_keywords[:2]]
+                title = " ".join(top_keywords)
+
+                # 제목이 너무 길면 자르기
+                if len(title) > 30:
+                    title = title[:30] + "..."
+
+                return title
+
+            # 키워드 추출 실패 시 첫 문장 사용
+            else:
+                sentences = re.split(r"[.?!。？！\n]+", cleaned_message)
+                first_sentence = sentences[0].strip()
+
+                if len(first_sentence) > 30:
+                    return first_sentence[:30] + "..."
+                return first_sentence
+
+        except Exception as e:
+            # 오류 발생 시 기본 제목 생성
+            logger.error(f"제목 생성 오류: {e}")
+
+            # 간단한 폴백 메커니즘: 메시지 앞부분 사용
+            if len(cleaned_message) > 30:
+                return cleaned_message[:30] + "..."
+            return cleaned_message
+
+    # async def generate_title(self, llm_instance, user_message: str) -> str:
+    #     """
+    #     대화 제목을 생성하는 함수
+    #     """
+    #     title_prompt = ChatPromptTemplate.from_messages(
+    #         [
+    #             (
+    #                 "system",
+    #                 """다음 대화 내용을 간결하게 요약하여 제목을 생성하세요.
+    #                    - 제목은 1문장으로 작성하세요.
+    #                    - 제목은 5단어 이내로 작성하세요.
+    #                    - 최대한 짧게 작성하세요.
+    #                    - 반드시 한국어만 사용
+    #                    - 추론 과정(<think>내용)은 무시
+    #                    - 핵심 키워드 위주로 구성""",
+    #             ),
+    #             ("human", "사용자: {user_message}"),
+    #         ]
+    #     )
+
+    #     chain = title_prompt | llm_instance | StrOutputParser()
+    #     title = await chain.ainvoke({"user_message": user_message})
+    #     return title.strip()
 
 
 # ==========================================================
