@@ -89,7 +89,7 @@ class StorageManager:
         Returns:
             생성된 제목
         """
-        title = await prompt_manager.generate_title(llm_instance, message)
+        title = await prompt_manager.generate_title(message)
         main_title = title
         # main_title, _ = message_processor.parse_message(title)
 

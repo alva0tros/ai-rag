@@ -125,7 +125,7 @@ class PromptManager:
             ]
         )
 
-    async def generate_title(self, llm_instance, user_message: str) -> str:
+    async def generate_title(self, user_message: str) -> str:
         """
         대화 제목을 생성하는 함수 - Yake 라이브러리 사용
         """
