@@ -1,502 +1,354 @@
 """
-Image Service module for handling image generation.
+이미지 생성 서비스 모듈
 
-This module provides the core functionality for image generation using deep learning models.
-It implements a singleton pattern for efficient model management and memory utilization.
+이 모듈은 이미지 생성의 서비스 레이어를 제공합니다.
+태스크 관리, 진행 상황 스트리밍, 이미지 저장 및 API와의 통신을 담당합니다.
 """
 
-import torch
-import numpy as np
-import io
-import gc
+import os
+import json
+import time
+import asyncio
 import logging
 from PIL import Image
-from typing import List, Callable, Dict, Any, Optional, Union, Tuple
-from contextlib import contextmanager
-
-from transformers import AutoConfig, AutoModelForCausalLM
-from src.janus.janus.models import VLChatProcessor
+from typing import List, Dict, Any, Optional, AsyncGenerator
 
 from app.core.config import settings
+from app.services.image_core import image_generator
 
 logger = logging.getLogger(__name__)
 
 
-class MemoryManager:
+class TaskManager:
     """
-    Helper class to manage GPU memory efficiently.
+    이미지 생성 태스크 관리자
     """
 
     def __init__(self):
-        """Initialize the memory manager."""
-        self._memory_usage_log = []
-        self._max_vram_usage = 0
-        self.cuda_device = "cuda" if torch.cuda.is_available() else "cpu"
+        """태스크 관리자 초기화"""
+        self.tasks = {}  # 진행 중인 작업 저장
 
-    def clear_gpu_memory(self) -> None:
+    async def create_task(self, conversation_id: str) -> Dict[str, Any]:
         """
-        Thoroughly clear GPU memory and collect garbage.
+        새 이미지 생성 태스크 생성
+
+        Args:
+            conversation_id: 대화 ID
+
+        Returns:
+            Dict[str, Any]: 태스크 데이터 구조
         """
-        if self.cuda_device == "cuda":
-            # Clear CUDA cache
-            torch.cuda.empty_cache()
-            # Run garbage collection
-            gc.collect()
+        task = {
+            "images": None,
+            "progress": 0.0,
+            "progress_event": asyncio.Event(),
+            "last_reported_progress": -1,
+            "generate_task": None,
+            "status": "initialized",
+            "created_at": time.time(),
+        }
 
-            # Log memory status
-            if torch.cuda.is_available():
-                current_mem = torch.cuda.memory_allocated() / 1024**2
-                max_mem = torch.cuda.max_memory_allocated() / 1024**2
-                logger.debug(f"Current GPU memory usage: {current_mem:.2f} MB")
-                logger.debug(f"Peak GPU memory usage: {max_mem:.2f} MB")
+        async with asyncio.Lock():
+            self.tasks[conversation_id] = task
 
-                # Track memory usage
-                self._memory_usage_log.append(current_mem)
-                self._max_vram_usage = max(self._max_vram_usage, max_mem)
+        logger.info(f"대화 {conversation_id}에 대한 새 태스크 생성")
+        return task
 
-            logger.info("GPU memory cleared")
+    def get_task(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        """
+        대화 ID로 태스크 가져오기
 
-    @property
-    def memory_usage_history(self) -> List[float]:
-        """Get memory usage history."""
-        return self._memory_usage_log
+        Args:
+            conversation_id: 대화 ID
 
-    @property
-    def max_memory_usage(self) -> float:
-        """Get maximum memory usage."""
-        return self._max_vram_usage
+        Returns:
+            Optional[Dict[str, Any]]: 태스크 데이터 또는 없으면 None
+        """
+        return self.tasks.get(conversation_id)
+
+    def update_task_status(self, conversation_id: str, status: str) -> bool:
+        """
+        태스크 상태 업데이트
+
+        Args:
+            conversation_id: 대화 ID
+            status: 새 상태
+
+        Returns:
+            bool: 성공 여부
+        """
+        if conversation_id not in self.tasks:
+            return False
+
+        self.tasks[conversation_id]["status"] = status
+        logger.debug(f"{conversation_id} 태스크 상태를 {status}(으)로 업데이트")
+        return True
+
+    async def cancel_task(self, conversation_id: str) -> bool:
+        """
+        실행 중인 태스크 취소
+
+        Args:
+            conversation_id: 대화 ID
+
+        Returns:
+            bool: 성공 여부
+        """
+        if conversation_id not in self.tasks:
+            logger.warning(f"대화 {conversation_id}에 대한 태스크를 찾을 수 없음")
+            return False
+
+        task = self.tasks[conversation_id]
+
+        if task["generate_task"] and not task["generate_task"].done():
+            task["generate_task"].cancel()
+            self.update_task_status(conversation_id, "cancelled")
+            logger.info(f"대화 {conversation_id}에 대한 태스크가 취소됨")
+            return True
+
+        return False
+
+    def cleanup_task(self, conversation_id: str) -> bool:
+        """
+        태스크를 제거하고 리소스 정리
+
+        Args:
+            conversation_id: 대화 ID
+
+        Returns:
+            bool: 성공 여부
+        """
+        if conversation_id in self.tasks:
+            task = self.tasks[conversation_id]
+
+            # 실행 중이면 태스크 취소
+            if task["generate_task"] and not task["generate_task"].done():
+                task["generate_task"].cancel()
+
+            # 태스크 제거
+            del self.tasks[conversation_id]
+            logger.info(f"대화 {conversation_id}에 대한 태스크 정리 완료")
+            return True
+
+        return False
+
+    def get_active_tasks_count(self) -> int:
+        """
+        활성 태스크 수 가져오기
+
+        Returns:
+            int: 활성 태스크 수
+        """
+        return len(
+            [
+                task_id
+                for task_id, task in self.tasks.items()
+                if task["generate_task"] and not task["generate_task"].done()
+            ]
+        )
 
 
 class ImageService:
     """
-    Service for generating images using deep learning models.
-    Implements a singleton pattern for efficient resource management.
+    이미지 생성 서비스 클래스
+    핵심 이미지 생성기를 래핑하고 태스크 관리 및 스트리밍 기능 제공
     """
 
     _instance = None
     _is_initialized = False
 
     def __new__(cls, *args, **kwargs):
-        """
-        Create a singleton instance or return the existing one.
-        """
+        """싱글톤 패턴 구현"""
         if cls._instance is None:
             cls._instance = super(ImageService, cls).__new__(cls)
-            cls._instance.tasks = {}  # Active tasks dictionary
-            cls._instance.model_loaded = False
-            cls._instance.vl_gpt = None
-            cls._instance.vl_chat_processor = None
-            cls._instance.tokenizer = None
             cls._instance.progress_callback = None
         return cls._instance
 
-    def __init__(self, progress_callback: Optional[Callable[[float], None]] = None):
-        """
-        Initialize the image service with optional progress callback.
-
-        Args:
-            progress_callback: Function to call with progress updates
-        """
-        # Skip initialization if already done
+    def __init__(self):
+        """서비스 초기화"""
+        # 이미 초기화된 경우 스킵
         if self._is_initialized:
-            if progress_callback is not None:
-                self.progress_callback = progress_callback
             return
 
-        # Set up the service
-        self.model_path = settings.IMAGE_MODEL_PATH
-        self.memory_manager = MemoryManager()
-        self.progress_callback = progress_callback
-
-        logger.info(
-            f"Initializing ImageService with device: {self.memory_manager.cuda_device}"
-        )
+        # 태스크 관리자 초기화
+        self.task_manager = TaskManager()
+        logger.info("ImageService 초기화 완료")
         self._is_initialized = True
 
-    def load_model(self, force_reload: bool = False) -> bool:
-        """
-        Load the image generation model.
-
-        Args:
-            force_reload: Force reload even if model is already loaded
-
-        Returns:
-            bool: Success status
-        """
-        # Skip loading if already loaded and not forcing reload
-        if self.model_loaded and not force_reload:
-            logger.info("Model already loaded, skipping load")
-            return True
-
-        logger.info(f"Loading model from {self.model_path}")
-        self.memory_manager.clear_gpu_memory()
-
-        try:
-            # Load model configuration
-            setting = AutoConfig.from_pretrained(self.model_path)
-            language_config = setting.language_config
-            language_config._attn_implementation = "eager"
-
-            # Set data type based on device
-            cuda_device = self.memory_manager.cuda_device
-            dtype = torch.bfloat16 if cuda_device == "cuda" else torch.float32
-
-            # Load the model
-            self.vl_gpt = AutoModelForCausalLM.from_pretrained(
-                self.model_path,
-                language_config=language_config,
-                trust_remote_code=True,
-                device_map="auto" if cuda_device == "cuda" else None,
-                low_cpu_mem_usage=True,
-                torch_dtype=dtype,
-            )
-
-            # Set to evaluation mode
-            self.vl_gpt = self.vl_gpt.eval()
-
-            # Enable CUDNN benchmark for faster inference if using CUDA
-            if cuda_device == "cuda":
-                torch.backends.cudnn.benchmark = True
-
-            # Load processor and tokenizer
-            self.vl_chat_processor = VLChatProcessor.from_pretrained(self.model_path)
-            self.tokenizer = self.vl_chat_processor.tokenizer
-
-            self.model_loaded = True
-            logger.info("Model loaded successfully")
-
-            # Final memory cleanup
-            self.memory_manager.clear_gpu_memory()
-            return True
-
-        except Exception as e:
-            logger.error(f"Model loading failed: {str(e)}")
-            self.memory_manager.clear_gpu_memory()
-            self.model_loaded = False
-            raise
-
-    def unload_model(self) -> bool:
-        """
-        Unload the model from memory to free resources.
-
-        Returns:
-            bool: Success status
-        """
-        if not self.model_loaded:
-            return True
-
-        logger.info("Unloading model from memory")
-
-        try:
-            # Move model to CPU first if using CUDA
-            if self.vl_gpt is not None:
-                if self.memory_manager.cuda_device == "cuda":
-                    self.vl_gpt = self.vl_gpt.cpu()
-                del self.vl_gpt
-                self.vl_gpt = None
-
-            # Clean up processor
-            if self.vl_chat_processor is not None:
-                del self.vl_chat_processor
-                self.vl_chat_processor = None
-
-            # Clean up tokenizer
-            if self.tokenizer is not None:
-                del self.tokenizer
-                self.tokenizer = None
-
-            # Clear memory
-            self.memory_manager.clear_gpu_memory()
-
-            self.model_loaded = False
-            logger.info("Model unloaded successfully")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error during model unloading: {str(e)}")
-            raise
-
-    @contextmanager
-    def model_context(self):
-        """
-        Context manager for automatically loading/unloading the model.
-
-        Example:
-            with image_service.model_context():
-                # Model is loaded here
-                result = image_service.generate(...)
-            # Model resources are cleaned up here
-        """
-        try:
-            self.load_model()
-            yield
-        finally:
-            # Don't unload, just clean up memory
-            self.memory_manager.clear_gpu_memory()
-
-    def check_model_loaded(self) -> bool:
-        """
-        Check if the model is loaded and load it if needed.
-
-        Returns:
-            bool: Whether the model is loaded
-        """
-        if not self.model_loaded:
-            logger.info("Model not loaded, loading now...")
-            self.load_model()
-        return self.model_loaded
-
-    def clear_task(self, conversation_id: str) -> bool:
-        """
-        Remove a task and clean up its resources.
-
-        Args:
-            conversation_id: ID of the conversation to clean up
-
-        Returns:
-            bool: Success status
-        """
-        if conversation_id in self.tasks:
-            task = self.tasks.pop(conversation_id, None)
-            if task and "generate_task" in task and task["generate_task"]:
-                task["generate_task"].cancel()
-            logger.info(f"Task cleared for conversation_id: {conversation_id}")
-            return True
-        return False
-
-    @torch.inference_mode()
-    def generate(
+    def save_generated_images(
         self,
-        input_ids: torch.Tensor,
-        width: int,
-        height: int,
-        temperature: float = 1,
-        parallel_size: int = 3,
-        cfg_weight: float = 5,
-        image_token_num_per_image: int = 576,
-        patch_size: int = 16,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        images: List[Image.Image],
+        user_id: int,
+        conversation_id: str,
+        message_id: str,
+    ) -> List[str]:
         """
-        Generate images based on input tokens.
+        생성된 이미지 저장 및 URL 반환
 
         Args:
-            input_ids: Input token IDs
-            width: Image width
-            height: Image height
-            temperature: Sampling temperature
-            parallel_size: Number of parallel images to generate
-            cfg_weight: Classifier-free guidance weight
-            image_token_num_per_image: Number of image tokens per image
-            patch_size: Size of image patches
+            images: 생성된 이미지 객체 리스트
+            user_id: 사용자 ID
+            conversation_id: 대화 ID
+            message_id: 메시지 ID
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Generated tokens and patches
+            List[str]: 이미지 URL 리스트
         """
-        # Ensure model is loaded
-        self.check_model_loaded()
-
-        # Clear GPU memory
-        self.memory_manager.clear_gpu_memory()
+        image_urls = []
+        save_dir = os.path.join(
+            settings.GENERATED_IMAGE_PATH, str(user_id), conversation_id, message_id
+        )
+        os.makedirs(save_dir, exist_ok=True)
 
         try:
-            # Prepare input tokens
-            tokens = torch.zeros((parallel_size * 2, len(input_ids)), dtype=torch.int)
-            if self.memory_manager.cuda_device == "cuda":
-                tokens = tokens.to(device=self.memory_manager.cuda_device)
+            for i, img in enumerate(images):
+                file_name = f"img{i}.png"
+                file_path = os.path.join(save_dir, file_name)
+                img.save(file_path, format="PNG")
+                image_url = f"/generated/images/{user_id}/{conversation_id}/{message_id}/{file_name}"
+                image_urls.append(image_url)
 
-            # Initialize tokens
-            for i in range(parallel_size * 2):
-                tokens[i, :] = input_ids
-                if i % 2 != 0:
-                    tokens[i, 1:-1] = self.vl_chat_processor.pad_id
-
-            # Get input embeddings
-            inputs_embeds = self.vl_gpt.language_model.get_input_embeddings()(tokens)
-
-            # Initialize generated tokens
-            generated_tokens = torch.zeros(
-                (parallel_size, image_token_num_per_image), dtype=torch.int
+            logger.info(
+                f"대화 {conversation_id}에 대해 {len(images)}개 이미지 저장 성공"
             )
-            if self.memory_manager.cuda_device == "cuda":
-                generated_tokens = generated_tokens.cuda()
-
-            # Previous key-values for efficient generation
-            pkv = None
-
-            # Generate tokens one by one
-            for i in range(image_token_num_per_image):
-                # Get model outputs
-                outputs = self.vl_gpt.language_model.model(
-                    inputs_embeds=inputs_embeds, use_cache=True, past_key_values=pkv
-                )
-                pkv = outputs.past_key_values
-                hidden_states = outputs.last_hidden_state
-
-                # Get logits and apply classifier-free guidance
-                logits = self.vl_gpt.gen_head(hidden_states[:, -1, :])
-                logit_cond = logits[0::2, :]
-                logit_uncond = logits[1::2, :]
-                logits = logit_uncond + cfg_weight * (logit_cond - logit_uncond)
-
-                # Sample next tokens
-                probs = torch.softmax(logits / temperature, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
-                generated_tokens[:, i] = next_token.squeeze(dim=-1)
-
-                # Prepare for next iteration
-                next_token = torch.cat(
-                    [next_token.unsqueeze(dim=1), next_token.unsqueeze(dim=1)], dim=1
-                ).view(-1)
-                img_embeds = self.vl_gpt.prepare_gen_img_embeds(next_token)
-                inputs_embeds = img_embeds.unsqueeze(dim=1)
-
-                # Update progress callback
-                progress = (i + 1) / image_token_num_per_image * 100
-                if self.progress_callback:
-                    self.progress_callback(progress)
-
-                # Periodically log memory status
-                if i % (image_token_num_per_image // 10) == 0:
-                    if (
-                        self.memory_manager.cuda_device == "cuda"
-                        and torch.cuda.is_available()
-                    ):
-                        current_mem = torch.cuda.memory_allocated() / 1024**2
-                        logger.debug(
-                            f"Step {i}/{image_token_num_per_image}, Memory: {current_mem:.2f} MB"
-                        )
-
-            # Decode generated tokens into image patches
-            patches = self.vl_gpt.gen_vision_model.decode_code(
-                generated_tokens.to(dtype=torch.int),
-                shape=[parallel_size, 8, width // patch_size, height // patch_size],
-            )
-
-            # Clean up memory
-            self.memory_manager.clear_gpu_memory()
-
-            return generated_tokens.to(dtype=torch.int), patches
+            return image_urls
 
         except Exception as e:
-            logger.error(f"Error in generate: {str(e)}")
-            self.memory_manager.clear_gpu_memory()
+            logger.error(f"대화 {conversation_id}에 대한 이미지 저장 오류: {str(e)}")
             raise
 
-    def unpack(
-        self, dec: torch.Tensor, width: int, height: int, parallel_size: int = 3
-    ) -> np.ndarray:
+    async def stream_generation_progress(
+        self,
+        prompt: str,
+        seed: Optional[int],
+        guidance: float,
+        user_id: int,
+        conversation_id: str,
+        message_id: str,
+    ) -> AsyncGenerator[Dict[str, str], None]:
         """
-        Unpack decoded tensor into image array.
+        이미지 생성 진행 상황 및 결과 스트리밍
 
         Args:
-            dec: Decoded tensor
-            width: Image width
-            height: Image height
-            parallel_size: Number of parallel images
+            prompt: 텍스트 프롬프트
+            seed: 재현성을 위한 랜덤 시드
+            guidance: 가이던스 스케일
+            user_id: 사용자 ID
+            conversation_id: 대화 ID
+            message_id: 메시지 ID
 
-        Returns:
-            np.ndarray: Array of images
+        Yields:
+            Dict[str, str]: 서버 전송 이벤트용 이벤트
         """
-        dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
-        dec = np.clip((dec + 1) / 2 * 255, 0, 255).astype(np.uint8)
-        return dec
+        # 태스크 초기화
+        task = await self.task_manager.create_task(conversation_id)
 
-    @torch.inference_mode()
-    def generate_image(
-        self, prompt: str, seed: Optional[int] = None, guidance: float = 5.0
-    ) -> List[Image.Image]:
-        """
-        Generate images based on a text prompt.
+        # 진행률 업데이트 콜백 정의
+        def progress_callback(progress: float) -> None:
+            """진행률 업데이트 및 리스너에게 알림"""
+            task["progress"] = progress
+            task["progress_event"].set()
 
-        Args:
-            prompt: Text prompt for image generation
-            seed: Random seed for reproducibility
-            guidance: Guidance scale for image generation
+            # 로그 수준 조정 (10% 단위 정보는 INFO, 세부 진행은 DEBUG)
+            if progress % 10 < 0.5 or progress >= 99.5:
+                logger.info(f"대화 {conversation_id}: 진행률 {progress:.1f}%")
+            else:
+                logger.debug(f"대화 {conversation_id}: 진행률 업데이트 {progress:.1f}%")
 
-        Returns:
-            List[Image.Image]: List of generated images
-        """
+        # 콜백 설정
+        image_generator.progress_callback = progress_callback
+
+        # 이미지 생성 함수
+        async def generate_images() -> None:
+            """백그라운드에서 이미지 생성 실행"""
+            try:
+                task["images"] = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: image_generator.generate_image(prompt, seed, guidance)
+                )
+            except Exception as e:
+                logger.error(f"대화 {conversation_id}: 이미지 생성 실패 - {str(e)}")
+                raise
+
+        # 이벤트 생성기
         try:
-            with self.model_context():
-                # Set random seed for reproducibility
-                seed = seed if seed is not None else 12345
-                torch.manual_seed(seed)
-                if self.memory_manager.cuda_device == "cuda":
-                    torch.cuda.manual_seed(seed)
-                np.random.seed(seed)
+            logger.debug(f"대화 {conversation_id}에 대한 이벤트 생성기 시작")
 
-                # Set image dimensions
-                width = 384
-                height = 384
-                parallel_size = 3
+            # 이미지 생성을 백그라운드로 시작
+            logger.debug(f"대화 {conversation_id}에 대한 이미지 생성 태스크 시작")
+            task["generate_task"] = asyncio.create_task(generate_images())
 
-                # Prepare conversation format
-                messages = [
-                    {
-                        "role": "User",
-                        "content": prompt,
-                    },
-                    {"role": "Assistant", "content": ""},
-                ]
+            # 진행률 스트리밍 (1% 단위로 전송)
+            while task["progress"] < 100.0:
+                await task["progress_event"].wait()
 
-                # Format the prompt for the model
-                text = self.vl_chat_processor.apply_sft_template_for_multi_turn_prompts(
-                    conversations=messages,
-                    sft_format=self.vl_chat_processor.sft_format,
-                    system_prompt="",
+                current_progress = round(task["progress"], 0)
+                if current_progress > task["last_reported_progress"]:
+                    task["last_reported_progress"] = current_progress
+                    yield {"event": "progress", "data": f"{current_progress}"}
+
+                task["progress_event"].clear()
+                await asyncio.sleep(0.1)
+
+            # 생성 완료 대기
+            await task["generate_task"]
+
+            # 최종 100% 진행률 보장
+            if task["last_reported_progress"] != 100:
+                yield {"event": "progress", "data": "100"}
+
+            logger.info(f"대화 {conversation_id}에 대한 이미지 생성 완료")
+
+            # 이미지 저장 및 URL 반환
+            if task["images"]:
+                logger.debug(
+                    f"대화 {conversation_id}에 대해 {len(task['images'])}개 이미지 저장"
                 )
-                text += self.vl_chat_processor.image_start_tag
-
-                # Convert to tensor
-                input_ids = torch.LongTensor(self.tokenizer.encode(text))
-
-                # Generate images
-                _, patches = self.generate(
-                    input_ids,
-                    width // 16 * 16,
-                    height // 16 * 16,
-                    cfg_weight=guidance,
-                    parallel_size=parallel_size,
+                image_urls = self.save_generated_images(
+                    task["images"], user_id, conversation_id, message_id
                 )
 
-                # Process and convert to PIL images
-                images = self.unpack(
-                    patches, width // 16 * 16, height // 16 * 16, parallel_size
+                logger.info(
+                    f"대화 {conversation_id}에 대해 {len(image_urls)}개 이미지 생성됨"
                 )
-                image_list = []
 
-                for i in range(parallel_size):
-                    img_array = images[i]
-                    img = Image.fromarray(img_array)
-                    img_resized = img.resize((384, 384), Image.Resampling.LANCZOS)
-                    image_list.append(img_resized)
+                yield {"event": "image", "data": json.dumps({"image_urls": image_urls})}
 
-                return image_list
+        except asyncio.CancelledError:
+            logger.warning(f"대화 {conversation_id}에 대한 이미지 생성 태스크가 취소됨")
+            yield {"event": "error", "data": "태스크가 취소되었습니다"}
 
         except Exception as e:
-            logger.error(f"Error during image generation: {str(e)}")
-            raise
+            logger.exception(
+                f"대화 {conversation_id}에 대한 진행률 스트리밍 오류: {str(e)}"
+            )
+            yield {"event": "error", "data": str(e)}
+
         finally:
-            # Ensure memory is cleaned up
-            self.memory_manager.clear_gpu_memory()
+            # 작업 정리
+            logger.debug(f"대화 {conversation_id}에 대한 리소스 정리")
+            self.task_manager.cleanup_task(conversation_id)
+
+    async def stop_image_generation(self, conversation_id: str) -> bool:
+        """
+        진행 중인 이미지 생성 프로세스 중지
+
+        Args:
+            conversation_id: 대화 ID
+
+        Returns:
+            bool: 성공 여부
+        """
+        return await self.task_manager.cancel_task(conversation_id)
 
 
-# Create singleton instance
+# 싱글톤 인스턴스 생성
 image_service = ImageService()
 
 
-# Helper functions for external use
-def multimodal_understanding(*args, **kwargs):
-    """
-    Process image and text input for multimodal understanding.
-    This is a wrapper around the image service's multimodal_understanding method.
-    """
-    return image_service.multimodal_understanding(*args, **kwargs)
-
-
+# 외부 호출용 헬퍼 함수
 def generate_image(*args, **kwargs):
     """
-    Generate images based on text prompt.
-    This is a wrapper around the image service's generate_image method.
+    텍스트 프롬프트 기반 이미지 생성
+    이것은 image_generator의 generate_image 메서드에 대한 래퍼입니다.
     """
-    return image_service.generate_image(*args, **kwargs)
+    return image_generator.generate_image(*args, **kwargs)
