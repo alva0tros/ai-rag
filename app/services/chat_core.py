@@ -127,61 +127,25 @@ class PromptManager:
 
     async def generate_title(self, user_message: str) -> str:
         """
-        대화 제목을 생성하는 함수 - Yake 라이브러리 사용
+        대화 제목을 생성하는 함수 - 고급 제목 생성기 사용
         """
-        # 특수문자와 과도한 공백 제거
-        cleaned_message = re.sub(r"\s+", " ", user_message).strip()
-
-        # <think> 태그가 있다면 제거
-        think_pattern = re.compile(r"<think>(.*?)<\/think>", re.DOTALL)
-        cleaned_message = think_pattern.sub("", cleaned_message).strip()
-
-        # 메시지가 너무 짧으면 그대로 반환
-        if len(cleaned_message) < 10:
-            return cleaned_message[:30]
-
+        from app.utils.title_generator import get_title_generator
+        
         try:
-            # Yake 키워드 추출기 초기화 (언어 자동 감지)
-            kw_extractor = yake.KeywordExtractor(
-                lan="ko",  # 기본값으로 설정하나 자동 감지 기능이 있음
-                n=2,  # 1-2개 단어로 구성된 키워드 추출
-                dedupLim=0.7,  # 중복 제거 임계값
-                top=3,  # 상위 3개 키워드 추출
-                features=None,
-            )
-
-            # 키워드 추출
-            keywords = kw_extractor.extract_keywords(cleaned_message)
-
-            # 키워드가 추출되었는지 확인
-            if keywords:
-                # 점수가 낮을수록 중요도가 높음 (Yake 특성)
-                sorted_keywords = sorted(keywords, key=lambda x: x[1])
-
-                # 상위 2개 키워드 사용
-                top_keywords = [kw[0] for kw in sorted_keywords[:2]]
-                title = " ".join(top_keywords)
-
-                # 제목이 너무 길면 자르기
-                if len(title) > 30:
-                    title = title[:30] + "..."
-
-                return title
-
-            # 키워드 추출 실패 시 첫 문장 사용
-            else:
-                sentences = re.split(r"[.?!。？！\n]+", cleaned_message)
-                first_sentence = sentences[0].strip()
-
-                if len(first_sentence) > 30:
-                    return first_sentence[:30] + "..."
-                return first_sentence
-
+            # 제목 생성기 가져오기
+            title_generator = get_title_generator()
+            
+            # 제목 생성 (최대 30자)
+            title = title_generator.generate_title(user_message, max_length=30)
+            
+            logger.info(f"제목 생성 완료: {title}")
+            return title
+            
         except Exception as e:
-            # 오류 발생 시 기본 제목 생성
             logger.error(f"제목 생성 오류: {e}")
-
-            # 간단한 폴백 메커니즘: 메시지 앞부분 사용
+            
+            # 오류 발생 시 간단한 대체 제목 생성
+            cleaned_message = user_message.strip()
             if len(cleaned_message) > 30:
                 return cleaned_message[:30] + "..."
             return cleaned_message
