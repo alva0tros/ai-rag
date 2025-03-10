@@ -21,7 +21,7 @@ from app.services.chat.chat_core import (
     MessageProcessor,
     EventManager,
 )
-from app.db.repositories import chat as chat_crud
+from app.db.repositories import chat_repository as chat_crud
 
 # ==========================================================
 # 기본 설정

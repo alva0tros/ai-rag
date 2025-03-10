@@ -3,7 +3,7 @@ import datetime
 from sqlalchemy import select, delete
 
 from app.db.session import async_session
-from app.db.entities.chat import ChatSession, ChatMessage
+from app.db.entities.chat_entity import ChatSession, ChatMessage
 
 
 logger = logging.getLogger(__name__)
@@ -139,7 +139,7 @@ async def delete_chat_session(session_id):
 
 
 # 제목변경(Update) 관련 함수
-async def update_chat_session(session_id: str, new_title: str):
+async def update_chat_session_title(session_id: str, new_title: str):
     """
     주어진 session_id의 chat_sessions 레코드의 title을 변경합니다.
     """

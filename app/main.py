@@ -2,8 +2,8 @@ import os
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1.chat import chat, history as chat_history
-from app.api.v1.image import image
+from app.api.v1.chat import chat, chat_history
+from app.api.v1.image import image, image_history
 from app.core.config import settings
 
 app = FastAPI()
@@ -22,7 +22,9 @@ app.add_middleware(
 # API 라우터 등록 (예: /api/v1/chat, /api/v1/stop)
 app.include_router(chat.router, prefix=settings.API_PREFIX)
 app.include_router(chat_history.router, prefix=settings.API_PREFIX)
+
 app.include_router(image.router, prefix=settings.API_PREFIX)
+app.include_router(image_history.router, prefix=settings.API_PREFIX)
 
 # static 폴더 전체를 마운트합니다.
 app.mount("/static", StaticFiles(directory=static_path), name="static")

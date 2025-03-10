@@ -57,5 +57,5 @@ class ChatMessage(Base):
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        UniqueConstraint("session_id", "message_id", name="uq_session_message"),
+        UniqueConstraint("session_id", "message_id", name="chat_messages_uk1"),
     )
