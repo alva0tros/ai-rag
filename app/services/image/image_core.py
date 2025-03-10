@@ -339,7 +339,7 @@ class ImageGenerator:
         width: int,
         height: int,
         temperature: float = 1,
-        parallel_size: int = 3,
+        parallel_size: int = 2,
         cfg_weight: float = 5,
         image_token_num_per_image: int = 576,
         patch_size: int = 16,
@@ -559,7 +559,7 @@ class ImageGenerator:
                 # 파라미터 설정
                 seed = seed if seed is not None else 12345
                 width, height = 384, 384
-                parallel_size = 3
+                parallel_size = 2
 
                 # 모든 랜덤 생성기에 시드 설정
                 self._set_random_seeds(seed)
