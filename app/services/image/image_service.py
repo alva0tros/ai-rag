@@ -14,7 +14,7 @@ from PIL import Image
 from typing import List, Dict, Any, Optional, AsyncGenerator
 
 from app.core.config import settings
-from app.services.image_core import image_generator
+from app.services.image.image_core import image_generator
 
 logger = logging.getLogger(__name__)
 

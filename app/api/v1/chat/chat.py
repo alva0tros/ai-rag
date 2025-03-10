@@ -11,7 +11,7 @@ from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 
-from app.services.chat_service import ChatService
+from app.services.chat.chat_service import ChatService
 
 # ==========================================================
 # 기본 설정

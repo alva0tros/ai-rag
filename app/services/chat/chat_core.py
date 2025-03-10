@@ -10,7 +10,6 @@ import asyncio
 import json
 import time
 import logging
-import yake
 from typing import Dict, Any, Tuple, AsyncGenerator
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -130,20 +129,20 @@ class PromptManager:
         대화 제목을 생성하는 함수 - 고급 제목 생성기 사용
         """
         from app.utils.title_generator import get_title_generator
-        
+
         try:
             # 제목 생성기 가져오기
             title_generator = get_title_generator()
-            
+
             # 제목 생성 (최대 30자)
             title = title_generator.generate_title(user_message, max_length=30)
-            
+
             logger.info(f"제목 생성 완료: {title}")
             return title
-            
+
         except Exception as e:
             logger.error(f"제목 생성 오류: {e}")
-            
+
             # 오류 발생 시 간단한 대체 제목 생성
             cleaned_message = user_message.strip()
             if len(cleaned_message) > 30:

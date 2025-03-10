@@ -7,13 +7,14 @@
 
 import logging
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from nanoid import generate as nanoid
-from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Request, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from app.services.image_service import image_service
+from app.services.image.image_service import image_service
+from app.services.image.image_prompt import image_prompt
 from app.core.config import settings
 
 # 라우터 및 로거 설정
@@ -54,10 +55,14 @@ async def generate_from_prompt(request: Request) -> EventSourceResponse:
 
         logger.info(f"Received image generation prompt from user {user_id}")
 
+        # 프롬프트 처리 (번역 및 향상)
+        enhanced_prompt = await image_prompt.translate_and_enhance(message)
+        logger.info(f"Processing image generation prompt from user {user_id}")
+
         # 서비스를 사용하여 이미지 생성 과정과 결과 스트리밍
         return EventSourceResponse(
             image_service.stream_generation_progress(
-                message, None, 5.0, user_id, conversation_id, message_id
+                enhanced_prompt, None, 5.0, user_id, conversation_id, message_id
             )
         )
 

@@ -10,7 +10,7 @@ import numpy as np
 import gc
 import logging
 from PIL import Image
-from typing import List, Callable, Optional, Union, Tuple
+from typing import List, Callable, Optional, Tuple
 from contextlib import contextmanager
 
 from transformers import AutoConfig, AutoModelForCausalLM
