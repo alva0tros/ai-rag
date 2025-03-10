@@ -51,7 +51,7 @@ class TaskManager:
         async with asyncio.Lock():
             self.tasks[conversation_id] = task
 
-        logger.info(f"대화 {conversation_id}에 대한 새 태스크 생성")
+        logger.info(f"Created new task for conversation {conversation_id}")
         return task
 
     def get_task(self, conversation_id: str) -> Optional[Dict[str, Any]]:
@@ -81,7 +81,7 @@ class TaskManager:
             return False
 
         self.tasks[conversation_id]["status"] = status
-        logger.debug(f"{conversation_id} 태스크 상태를 {status}(으)로 업데이트")
+        logger.debug(f"Updated task {conversation_id} status to {status}")
         return True
 
     async def cancel_task(self, conversation_id: str) -> bool:
@@ -95,7 +95,7 @@ class TaskManager:
             bool: 성공 여부
         """
         if conversation_id not in self.tasks:
-            logger.warning(f"대화 {conversation_id}에 대한 태스크를 찾을 수 없음")
+            logger.warning(f"No task found for conversation {conversation_id}")
             return False
 
         task = self.tasks[conversation_id]
@@ -103,7 +103,7 @@ class TaskManager:
         if task["generate_task"] and not task["generate_task"].done():
             task["generate_task"].cancel()
             self.update_task_status(conversation_id, "cancelled")
-            logger.info(f"대화 {conversation_id}에 대한 태스크가 취소됨")
+            logger.info(f"Task for conversation {conversation_id} has been cancelled")
             return True
 
         return False
@@ -127,7 +127,7 @@ class TaskManager:
 
             # 태스크 제거
             del self.tasks[conversation_id]
-            logger.info(f"대화 {conversation_id}에 대한 태스크 정리 완료")
+            logger.info(f"Cleaned up task for conversation {conversation_id}")
             return True
 
         return False
@@ -172,7 +172,7 @@ class ImageService:
 
         # 태스크 관리자 초기화
         self.task_manager = TaskManager()
-        logger.info("ImageService 초기화 완료")
+        logger.info("ImageService initialization complete")
         self._is_initialized = True
 
     def save_generated_images(
@@ -209,12 +209,14 @@ class ImageService:
                 image_urls.append(image_url)
 
             logger.info(
-                f"대화 {conversation_id}에 대해 {len(images)}개 이미지 저장 성공"
+                f"Successfully saved {len(images)} images for conversation {conversation_id}"
             )
             return image_urls
 
         except Exception as e:
-            logger.error(f"대화 {conversation_id}에 대한 이미지 저장 오류: {str(e)}")
+            logger.error(
+                f"Error saving images for conversation {conversation_id}: {str(e)}"
+            )
             raise
 
     async def stream_generation_progress(
@@ -251,9 +253,11 @@ class ImageService:
 
             # 로그 수준 조정 (10% 단위 정보는 INFO, 세부 진행은 DEBUG)
             if progress % 10 < 0.5 or progress >= 99.5:
-                logger.info(f"대화 {conversation_id}: 진행률 {progress:.1f}%")
+                logger.info(f"Conversation {conversation_id}: progress {progress:.1f}%")
             else:
-                logger.debug(f"대화 {conversation_id}: 진행률 업데이트 {progress:.1f}%")
+                logger.debug(
+                    f"Conversation {conversation_id}: progress update {progress:.1f}%"
+                )
 
         # 콜백 설정
         image_generator.progress_callback = progress_callback
@@ -266,15 +270,19 @@ class ImageService:
                     None, lambda: image_generator.generate_image(prompt, seed, guidance)
                 )
             except Exception as e:
-                logger.error(f"대화 {conversation_id}: 이미지 생성 실패 - {str(e)}")
+                logger.error(
+                    f"Conversation {conversation_id}: image generation failed - {str(e)}"
+                )
                 raise
 
         # 이벤트 생성기
         try:
-            logger.debug(f"대화 {conversation_id}에 대한 이벤트 생성기 시작")
+            logger.debug(f"Starting event generator for conversation {conversation_id}")
 
             # 이미지 생성을 백그라운드로 시작
-            logger.debug(f"대화 {conversation_id}에 대한 이미지 생성 태스크 시작")
+            logger.debug(
+                f"Starting image generation task for conversation {conversation_id}"
+            )
             task["generate_task"] = asyncio.create_task(generate_images())
 
             # 진행률 스트리밍 (1% 단위로 전송)
@@ -296,36 +304,40 @@ class ImageService:
             if task["last_reported_progress"] != 100:
                 yield {"event": "progress", "data": "100"}
 
-            logger.info(f"대화 {conversation_id}에 대한 이미지 생성 완료")
+            logger.info(
+                f"Image generation for conversation {conversation_id} completed"
+            )
 
             # 이미지 저장 및 URL 반환
             if task["images"]:
                 logger.debug(
-                    f"대화 {conversation_id}에 대해 {len(task['images'])}개 이미지 저장"
+                    f"Saving {len(task['images'])} images for conversation {conversation_id}"
                 )
                 image_urls = self.save_generated_images(
                     task["images"], user_id, conversation_id, message_id
                 )
 
                 logger.info(
-                    f"대화 {conversation_id}에 대해 {len(image_urls)}개 이미지 생성됨"
+                    f"Generated {len(image_urls)} images for conversation {conversation_id}"
                 )
 
                 yield {"event": "image", "data": json.dumps({"image_urls": image_urls})}
 
         except asyncio.CancelledError:
-            logger.warning(f"대화 {conversation_id}에 대한 이미지 생성 태스크가 취소됨")
-            yield {"event": "error", "data": "태스크가 취소되었습니다"}
+            logger.warning(
+                f"Image generation task for conversation {conversation_id} was cancelled"
+            )
+            yield {"event": "error", "data": "Task was cancelled"}
 
         except Exception as e:
             logger.exception(
-                f"대화 {conversation_id}에 대한 진행률 스트리밍 오류: {str(e)}"
+                f"Error streaming progress for conversation {conversation_id}: {str(e)}"
             )
             yield {"event": "error", "data": str(e)}
 
         finally:
             # 작업 정리
-            logger.debug(f"대화 {conversation_id}에 대한 리소스 정리")
+            logger.debug(f"Cleaning up resources for conversation {conversation_id}")
             self.task_manager.cleanup_task(conversation_id)
 
     async def stop_image_generation(self, conversation_id: str) -> bool:

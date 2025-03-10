@@ -46,14 +46,14 @@ class MemoryManager:
             if torch.cuda.is_available():
                 current_mem = torch.cuda.memory_allocated() / 1024**2
                 max_mem = torch.cuda.max_memory_allocated() / 1024**2
-                logger.debug(f"현재 GPU 메모리 사용량: {current_mem:.2f} MB")
-                logger.debug(f"최대 GPU 메모리 사용량: {max_mem:.2f} MB")
+                logger.debug(f"Current GPU memory usage: {current_mem:.2f} MB")
+                logger.debug(f"Maximum GPU memory usage: {max_mem:.2f} MB")
 
                 # 메모리 사용량 추적
                 self._memory_usage_log.append(current_mem)
                 self._max_vram_usage = max(self._max_vram_usage, max_mem)
 
-            logger.info("GPU 메모리 정리 완료")
+            logger.info("GPU memory cleanup complete")
 
     @property
     def memory_usage_history(self) -> List[float]:
@@ -106,7 +106,9 @@ class ImageGenerator:
         self.memory_manager = MemoryManager()
         self.progress_callback = progress_callback
 
-        logger.info(f"ImageGenerator 초기화: 장치={self.memory_manager.cuda_device}")
+        logger.info(
+            f"ImageGenerator initialized: device={self.memory_manager.cuda_device}"
+        )
         self._is_initialized = True
 
     def load_model(self, force_reload: bool = False) -> bool:
@@ -121,10 +123,10 @@ class ImageGenerator:
         """
         # 이미 로드되어 있고 강제 재로드가 아니면 스킵
         if self.model_loaded and not force_reload:
-            logger.info("모델이 이미 로드됨, 로드 건너뜀")
+            logger.info("Model already loaded, skipping load")
             return True
 
-        logger.info(f"모델 로드 시작: {self.model_path}")
+        logger.info(f"Starting model load: {self.model_path}")
         self.memory_manager.clear_gpu_memory()
 
         try:
@@ -159,14 +161,14 @@ class ImageGenerator:
             self.tokenizer = self.vl_chat_processor.tokenizer
 
             self.model_loaded = True
-            logger.info("모델 로드 성공")
+            logger.info("Model load successful")
 
             # 최종 메모리 정리
             self.memory_manager.clear_gpu_memory()
             return True
 
         except Exception as e:
-            logger.error(f"모델 로드 실패: {str(e)}")
+            logger.error(f"Model load failed: {str(e)}")
             self.memory_manager.clear_gpu_memory()
             self.model_loaded = False
             raise
@@ -181,7 +183,7 @@ class ImageGenerator:
         if not self.model_loaded:
             return True
 
-        logger.info("모델 메모리에서 언로드 시작")
+        logger.info("Starting model unload from memory")
 
         try:
             # CUDA 사용 시 먼저 CPU로 이동
@@ -205,11 +207,11 @@ class ImageGenerator:
             self.memory_manager.clear_gpu_memory()
 
             self.model_loaded = False
-            logger.info("모델 언로드 성공")
+            logger.info("Model unload successful")
             return True
 
         except Exception as e:
-            logger.error(f"모델 언로드 중 오류: {str(e)}")
+            logger.error(f"Error during model unload: {str(e)}")
             raise
 
     @contextmanager
@@ -238,7 +240,7 @@ class ImageGenerator:
             bool: 모델 로드 여부
         """
         if not self.model_loaded:
-            logger.info("모델이 로드되지 않음, 지금 로드합니다...")
+            logger.info("Model not loaded, loading now...")
             self.load_model()
         return self.model_loaded
 
@@ -360,26 +362,26 @@ class ImageGenerator:
         """
         # 입력 검증
         if width <= 0 or height <= 0:
-            msg = f"유효하지 않은 크기: width={width}, height={height}"
+            msg = f"Invalid dimensions: width={width}, height={height}"
             logger.error(msg)
             raise ValueError(msg)
 
         if parallel_size <= 0:
-            msg = f"유효하지 않은 parallel_size: {parallel_size}"
+            msg = f"Invalid parallel_size: {parallel_size}"
             logger.error(msg)
             raise ValueError(msg)
 
         # 모델 로드 확인
         if not self.check_model_loaded():
-            msg = "모델 로드 실패"
+            msg = "Failed to load model"
             logger.error(msg)
             raise RuntimeError(msg)
 
         # GPU 메모리 정리 및 현재 상태 로깅
         self.memory_manager.clear_gpu_memory()
-        logger.info(f"{parallel_size}개 병렬 이미지 생성 시작")
+        logger.info(f"Starting generation of {parallel_size} parallel images")
         logger.debug(
-            f"생성 파라미터: width={width}, height={height}, temperature={temperature}, cfg_weight={cfg_weight}"
+            f"Generation parameters: width={width}, height={height}, temperature={temperature}, cfg_weight={cfg_weight}"
         )
 
         import time
@@ -461,8 +463,8 @@ class ImageGenerator:
                     ):
                         current_mem = torch.cuda.memory_allocated() / 1024**2
                         logger.debug(
-                            f"토큰 {i}/{image_token_num_per_image} ({progress:.1f}%), "
-                            f"메모리: {current_mem:.2f} MB"
+                            f"Token {i}/{image_token_num_per_image} ({progress:.1f}%), "
+                            f"memory: {current_mem:.2f} MB"
                         )
 
             # 평균 토큰 생성 시간 계산
@@ -472,10 +474,12 @@ class ImageGenerator:
                     / len(token_times)
                     / (image_token_num_per_image // 10)
                 )
-                logger.debug(f"토큰당 평균 시간: {avg_time_per_token*1000:.2f} ms")
+                logger.debug(
+                    f"Average time per token: {avg_time_per_token*1000:.2f} ms"
+                )
 
             # 디코딩 전 로깅
-            logger.debug("토큰 생성 완료, 이미지로 디코딩 중")
+            logger.debug("Token generation complete, decoding to image")
 
             # 생성된 토큰을 이미지 패치로 디코딩
             try:
@@ -485,14 +489,16 @@ class ImageGenerator:
                 )
             except RuntimeError as e:
                 if "CUDA out of memory" in str(e):
-                    logger.error("디코딩 중 CUDA 메모리 부족")
+                    logger.error("CUDA out of memory during decoding")
                     self.memory_manager.clear_gpu_memory()
-                    raise MemoryError("디코딩을 위한 GPU 메모리 부족") from e
+                    raise MemoryError("Insufficient GPU memory for decoding") from e
                 raise
 
             # 생성 완료 로깅
             generation_time = time.time() - generation_start_time
-            logger.info(f"이미지 생성 완료, 소요 시간: {generation_time:.2f}초")
+            logger.info(
+                f"Image generation complete, time taken: {generation_time:.2f} seconds"
+            )
 
             # 메모리 정리
             self.memory_manager.clear_gpu_memory()
@@ -501,13 +507,13 @@ class ImageGenerator:
 
         except ValueError as e:
             # 입력 검증 오류
-            logger.error(f"유효하지 않은 입력 파라미터: {str(e)}")
+            logger.error(f"Invalid input parameters: {str(e)}")
             self.memory_manager.clear_gpu_memory()
             raise
 
         except MemoryError as e:
             # 메모리 관련 오류
-            logger.error(f"생성 중 메모리 오류: {str(e)}")
+            logger.error(f"Memory error during generation: {str(e)}")
             self.memory_manager.clear_gpu_memory()
             raise
 
@@ -515,17 +521,17 @@ class ImageGenerator:
             # 런타임 오류 (주로 PyTorch에서)
             error_msg = str(e)
             if "CUDA out of memory" in error_msg:
-                logger.error(f"CUDA 메모리 부족: {error_msg}")
+                logger.error(f"CUDA out of memory: {error_msg}")
                 self.memory_manager.clear_gpu_memory()
-                raise MemoryError(f"GPU 메모리 부족: {error_msg}") from e
+                raise MemoryError(f"GPU memory insufficient: {error_msg}") from e
             else:
-                logger.error(f"generate 메서드에서 런타임 오류: {error_msg}")
+                logger.error(f"Runtime error in generate method: {error_msg}")
                 self.memory_manager.clear_gpu_memory()
                 raise
 
         except Exception as e:
             # 예상치 못한 오류에 대한 포괄적 처리
-            logger.exception(f"generate 메서드에서 예상치 못한 오류: {str(e)}")
+            logger.exception(f"Unexpected error in generate method: {str(e)}")
             self.memory_manager.clear_gpu_memory()
             raise
 
@@ -576,7 +582,7 @@ class ImageGenerator:
                 )
 
         except Exception as e:
-            logger.error(f"이미지 생성 중 오류: {str(e)}")
+            logger.error(f"Error during image generation: {str(e)}")
             raise
         finally:
             # 메모리 정리 보장
