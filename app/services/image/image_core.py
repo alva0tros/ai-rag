@@ -9,8 +9,10 @@ import torch
 import numpy as np
 import gc
 import logging
+import os
+import psutil
 from PIL import Image
-from typing import List, Callable, Optional, Tuple
+from typing import List, Callable, Optional, Tuple, Dict, Union
 from contextlib import contextmanager
 
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -20,40 +22,236 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# PyTorch 메모리 단편화 방지 환경 변수 설정
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 
 class MemoryManager:
     """
     GPU 메모리를 효율적으로 관리하는 헬퍼 클래스
+    메모리 최적화 기능 추가
     """
 
     def __init__(self):
         """메모리 관리자 초기화"""
         self._memory_usage_log = []
         self._max_vram_usage = 0
-        self.cuda_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._available_devices = self._detect_available_devices()
+        self._force_single_gpu = True  # 항상 단일 GPU만 사용
+        self._current_device = self._select_best_device()
+
+        # Janus-7B vs Janus-1B 감지 및 모델 크기 제한
+        self.model_size_gb_threshold = 4  # 기본 임계값 설정
+
+        logger.info(f"Available devices: {self._available_devices}")
+        logger.info(f"Selected device: {self._current_device}")
+        logger.info(f"Forcing single GPU mode: {self._force_single_gpu}")
+
+        # 시스템 메모리 정보 로깅
+        self._log_system_memory()
+
+    def _log_system_memory(self):
+        """시스템 메모리 정보 로깅"""
+        # 시스템 메모리 정보
+        system_memory = psutil.virtual_memory()
+        logger.info(
+            f"System memory: {system_memory.total / (1024**3):.2f} GB total, "
+            f"{system_memory.available / (1024**3):.2f} GB available"
+        )
+
+        # GPU 메모리 정보
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                try:
+                    total_memory = torch.cuda.get_device_properties(i).total_memory / (
+                        1024**3
+                    )
+                    allocated_memory = torch.cuda.memory_allocated(i) / (1024**3)
+                    free_memory = total_memory - allocated_memory
+                    logger.info(
+                        f"GPU {i}: {total_memory:.2f} GB total, "
+                        f"{allocated_memory:.2f} GB allocated, "
+                        f"{free_memory:.2f} GB free"
+                    )
+                except Exception as e:
+                    logger.warning(f"Error checking GPU {i} memory: {e}")
+
+    def _detect_available_devices(self) -> List[str]:
+        """
+        사용 가능한 모든 CUDA 장치 탐지
+        """
+        devices = []
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                devices.append(f"cuda:{i}")
+
+        # 사용 가능한 CUDA 장치가 없으면 CPU 추가
+        if not devices:
+            devices.append("cpu")
+
+        return devices
+
+    def _select_best_device(self) -> str:
+        """
+        가장 메모리가 여유 있는 장치 선택
+        단일 GPU 모드에서는 첫 번째 GPU만 사용
+        """
+        # 강제 단일 GPU 모드 - 항상 cuda:0 사용 (사용 가능한 경우)
+        if self._force_single_gpu and torch.cuda.is_available():
+            logger.info("Forcing use of first GPU (cuda:0) only")
+            return "cuda:0"
+
+        if not self._available_devices or len(self._available_devices) == 1:
+            return self._available_devices[0] if self._available_devices else "cpu"
+
+        # GPU 메모리 사용량 확인
+        free_memory = {}
+        for device in self._available_devices:
+            if device.startswith("cuda"):
+                device_idx = int(device.split(":")[-1])
+                try:
+                    free_memory[device] = torch.cuda.get_device_properties(
+                        device_idx
+                    ).total_memory - torch.cuda.memory_allocated(device_idx)
+                except Exception as e:
+                    logger.warning(f"Error checking memory for {device}: {e}")
+                    continue
+
+        # 가장 메모리가 많이 남은 장치 선택
+        if free_memory:
+            best_device = max(free_memory.keys(), key=lambda k: free_memory[k])
+            return best_device
+
+        return "cpu"
+
+    def get_current_device(self) -> str:
+        """
+        현재 선택된 장치 반환
+        """
+        return self._current_device
+
+    def switch_to_device(self, device: Optional[str] = None) -> str:
+        """
+        특정 장치로 전환 (지정하지 않으면 최적 장치 선택)
+        """
+        if self._force_single_gpu and torch.cuda.is_available():
+            # 강제 단일 GPU 모드에서는 항상 cuda:0 반환
+            self._current_device = "cuda:0"
+            logger.info(f"Forced switch to cuda:0 (single GPU mode)")
+            return self._current_device
+
+        if device and device in self._available_devices:
+            self._current_device = device
+        else:
+            self._current_device = self._select_best_device()
+
+        logger.info(f"Switched to device: {self._current_device}")
+        return self._current_device
 
     def clear_gpu_memory(self) -> None:
         """
         GPU 메모리를 철저히 정리하고 가비지 컬렉션 실행
         """
-        if self.cuda_device == "cuda":
+        # 파이썬 가비지 컬렉션 - 먼저 실행
+        gc.collect()
+
+        if self._current_device.startswith("cuda"):
             # CUDA 캐시 비우기
             torch.cuda.empty_cache()
-            # 가비지 컬렉션 실행
-            gc.collect()
 
             # 메모리 상태 로깅
-            if torch.cuda.is_available():
-                current_mem = torch.cuda.memory_allocated() / 1024**2
-                max_mem = torch.cuda.max_memory_allocated() / 1024**2
-                logger.debug(f"Current GPU memory usage: {current_mem:.2f} MB")
-                logger.debug(f"Maximum GPU memory usage: {max_mem:.2f} MB")
+            try:
+                current_device_idx = int(self._current_device.split(":")[-1])
+                current_mem = torch.cuda.memory_allocated(current_device_idx) / 1024**3
+                max_mem = torch.cuda.max_memory_allocated(current_device_idx) / 1024**3
+                logger.debug(
+                    f"Current GPU memory usage ({self._current_device}): {current_mem:.2f} GB"
+                )
+                logger.debug(
+                    f"Maximum GPU memory usage ({self._current_device}): {max_mem:.2f} GB"
+                )
 
                 # 메모리 사용량 추적
                 self._memory_usage_log.append(current_mem)
                 self._max_vram_usage = max(self._max_vram_usage, max_mem)
+            except Exception as e:
+                logger.warning(f"Error logging memory usage: {e}")
 
-            logger.info("GPU memory cleanup complete")
+            logger.info(f"GPU memory cleanup complete on {self._current_device}")
+
+    def is_cuda_available(self) -> bool:
+        """
+        CUDA 사용 가능 여부 확인
+        """
+        return self._current_device.startswith("cuda")
+
+    def get_device_count(self) -> int:
+        """
+        사용 가능한 GPU 장치 수 반환
+        """
+        return (
+            1
+            if self._force_single_gpu and torch.cuda.is_available()
+            else torch.cuda.device_count() if torch.cuda.is_available() else 0
+        )
+
+    def get_available_gpu_memory(self, device_idx: int = 0) -> float:
+        """
+        사용 가능한 GPU 메모리 반환 (GB 단위)
+
+        Args:
+            device_idx: GPU 인덱스
+
+        Returns:
+            float: 사용 가능한 메모리 (GB)
+        """
+        if not torch.cuda.is_available():
+            return 0.0
+
+        try:
+            total = torch.cuda.get_device_properties(device_idx).total_memory / (
+                1024**3
+            )
+            allocated = torch.cuda.memory_allocated(device_idx) / (1024**3)
+            return total - allocated
+        except Exception as e:
+            logger.warning(f"Error checking available GPU memory: {e}")
+            return 0.0
+
+    def check_model_fits_in_memory(
+        self, model_size_gb: float, device: Optional[str] = None
+    ) -> bool:
+        """
+        모델이 메모리에 맞는지 확인
+
+        Args:
+            model_size_gb: 모델 크기 (GB)
+            device: 확인할 장치 (지정하지 않으면 현재 장치)
+
+        Returns:
+            bool: 모델이 메모리에 맞는지 여부
+        """
+        target_device = device if device is not None else self._current_device
+
+        if target_device == "cpu":
+            # CPU 메모리 확인
+            available_memory = psutil.virtual_memory().available / (1024**3)
+            fits = available_memory > model_size_gb * 1.5  # 1.5배 여유 공간 확보
+            logger.info(
+                f"Model size: {model_size_gb:.2f} GB, Available CPU memory: {available_memory:.2f} GB, Fits: {fits}"
+            )
+            return fits
+        else:
+            # GPU 메모리 확인
+            device_idx = (
+                int(target_device.split(":")[-1]) if ":" in target_device else 0
+            )
+            available_memory = self.get_available_gpu_memory(device_idx)
+            fits = available_memory > model_size_gb * 1.2  # 1.2배 여유 공간 확보
+            logger.info(
+                f"Model size: {model_size_gb:.2f} GB, Available GPU memory: {available_memory:.2f} GB, Fits: {fits}"
+            )
+            return fits
 
     @property
     def memory_usage_history(self) -> List[float]:
@@ -86,6 +284,10 @@ class ImageGenerator:
             cls._instance.vl_chat_processor = None
             cls._instance.tokenizer = None
             cls._instance.progress_callback = None
+            cls._instance.device = None
+            cls._instance.use_8bit = False  # 8비트 양자화 사용 여부
+            cls._instance.use_4bit = False  # 4비트 양자화 사용 여부
+            cls._instance.use_low_cpu_mem_usage = True  # 낮은 CPU 메모리 사용
         return cls._instance
 
     def __init__(self, progress_callback: Optional[Callable[[float], None]] = None):
@@ -106,10 +308,260 @@ class ImageGenerator:
         self.memory_manager = MemoryManager()
         self.progress_callback = progress_callback
 
+        # 모델 로드 시에 사용할 장치 설정 - 항상 단일 GPU 사용
+        self.device = self.memory_manager.get_current_device()
+        self.use_cuda = settings.USE_CUDA and self.memory_manager.is_cuda_available()
+
+        # 모델 크기 감지 (Janus-7B vs Janus-1B)
+        self.model_size = self._detect_model_size()
+
+        # 메모리 상황에 따라 양자화 설정 자동 조정
+        self._adjust_quantization_settings()
+
         logger.info(
-            f"ImageGenerator initialized: device={self.memory_manager.cuda_device}"
+            f"ImageGenerator initialized: device={self.device}, use_cuda={self.use_cuda}"
+        )
+        logger.info(
+            f"Model settings: model_size={self.model_size}GB, use_8bit={self.use_8bit}, use_4bit={self.use_4bit}"
         )
         self._is_initialized = True
+
+    def _detect_model_size(self) -> float:
+        """
+        모델 크기 감지 (Janus-7B vs Janus-1B)
+        모델 이름에서 크기 추정
+
+        Returns:
+            float: 모델 크기 추정값 (GB)
+        """
+        model_size_gb = 2.0  # 기본값 (알 수 없는 경우)
+
+        try:
+            # 모델 경로에서 크기 정보 추출
+            model_name = os.path.basename(self.model_path)
+
+            if "7B" in model_name:
+                model_size_gb = 14.0  # Janus-7B 예상 크기
+                logger.info(
+                    f"Detected Janus-7B model, estimated size: {model_size_gb}GB"
+                )
+            elif "1B" in model_name:
+                model_size_gb = 2.0  # Janus-1B 예상 크기
+                logger.info(
+                    f"Detected Janus-1B model, estimated size: {model_size_gb}GB"
+                )
+            else:
+                logger.warning(
+                    f"Unknown model size from path: {self.model_path}, using default estimate"
+                )
+        except Exception as e:
+            logger.warning(f"Error detecting model size: {e}")
+
+        return model_size_gb
+
+    def _adjust_quantization_settings(self) -> None:
+        """
+        메모리 상황에 따라 양자화 설정 자동 조정
+        """
+        # 현재 사용 가능한 메모리 확인
+        if self.use_cuda:
+            device_idx = int(self.device.split(":")[-1]) if ":" in self.device else 0
+            available_memory_gb = self.memory_manager.get_available_gpu_memory(
+                device_idx
+            )
+        else:
+            available_memory_gb = psutil.virtual_memory().available / (1024**3)
+
+        logger.info(
+            f"Available memory: {available_memory_gb:.2f}GB, Model size: {self.model_size}GB"
+        )
+
+        # 메모리 상황에 따라 양자화 설정 자동 조정
+        if available_memory_gb < self.model_size:
+            # 메모리가 부족한 경우 더 강력한 양자화 적용
+            if available_memory_gb < self.model_size / 2:
+                # 매우 부족한 경우 4비트 적용
+                self.use_4bit = True
+                self.use_8bit = False
+                logger.info(f"Auto-enabling 4-bit quantization due to limited memory")
+            else:
+                # 부족한 경우 8비트 적용
+                self.use_8bit = True
+                self.use_4bit = False
+                logger.info(f"Auto-enabling 8-bit quantization due to limited memory")
+        else:
+            # 메모리가 충분한 경우 기본 설정 유지
+            self.use_8bit = False
+            self.use_4bit = False
+            logger.info(f"Using full precision model")
+
+    def _move_model_to_device(self, target_device: str) -> None:
+        """
+        모델의 모든 구성 요소를 지정된 장치로 이동
+
+        Args:
+            target_device: 이동할 대상 장치
+        """
+        if not self.model_loaded or self.vl_gpt is None:
+            logger.warning("Cannot move model: Model not loaded")
+            return
+
+        try:
+            logger.info(f"Moving model to device: {target_device}")
+
+            # 전체 모델을 한 번에 장치로 이동 - 가장 안전한 방법
+            self.vl_gpt = self.vl_gpt.to(target_device)
+
+            # 디버깅: 모델 주요 구성 요소의 장치 확인
+            if hasattr(self.vl_gpt, "gen_vision_model"):
+                if hasattr(self.vl_gpt.gen_vision_model, "quantize") and hasattr(
+                    self.vl_gpt.gen_vision_model.quantize, "embedding"
+                ):
+                    embedding_device = (
+                        self.vl_gpt.gen_vision_model.quantize.embedding.device
+                    )
+                    logger.debug(f"Embedding device after move: {embedding_device}")
+
+                if hasattr(self.vl_gpt.gen_vision_model, "post_quant_conv"):
+                    post_quant_device = (
+                        self.vl_gpt.gen_vision_model.post_quant_conv.weight.device
+                    )
+                    logger.debug(
+                        f"Post quant conv device after move: {post_quant_device}"
+                    )
+
+            logger.info(f"Model successfully moved to {target_device}")
+            self.device = target_device
+
+        except Exception as e:
+            logger.error(f"Error moving model to device {target_device}: {str(e)}")
+            raise
+
+    def _validate_model_on_device(self) -> bool:
+        """
+        모델의 모든 중요 구성 요소가 동일한 장치에 있는지 확인
+
+        Returns:
+            bool: 모든 구성 요소가 동일한 장치에 있는지 여부
+        """
+        if not self.model_loaded or self.vl_gpt is None:
+            return False
+
+        try:
+            target_device = self.device
+            devices = set()
+
+            # gen_vision_model 장치 확인
+            if hasattr(self.vl_gpt, "gen_vision_model"):
+                # 모델 자체에서 파라미터 확인
+                found_param = False
+                for param in self.vl_gpt.gen_vision_model.parameters():
+                    devices.add(str(param.device))
+                    found_param = True
+                    break
+
+                if not found_param:
+                    # 파라미터가 없으면 버퍼 확인
+                    for buf in self.vl_gpt.gen_vision_model.buffers():
+                        devices.add(str(buf.device))
+                        break
+
+                # quantize 구성 요소 확인
+                if hasattr(self.vl_gpt.gen_vision_model, "quantize"):
+                    # embedding 확인 (안전하게)
+                    if hasattr(self.vl_gpt.gen_vision_model.quantize, "embedding"):
+                        embedding = self.vl_gpt.gen_vision_model.quantize.embedding
+
+                        # 다양한 방법으로 장치 정보 확인 시도
+                        if hasattr(embedding, "weight"):
+                            # 가중치를 통해 장치 확인
+                            devices.add(str(embedding.weight.device))
+                        elif hasattr(embedding, "parameters"):
+                            # 파라미터 메서드를 통해 확인
+                            param_found = False
+                            for param in embedding.parameters():
+                                devices.add(str(param.device))
+                                param_found = True
+                                break
+
+                            if not param_found and hasattr(embedding, "buffers"):
+                                # 버퍼를 통해 확인
+                                for buf in embedding.buffers():
+                                    devices.add(str(buf.device))
+                                    break
+                        elif isinstance(embedding, torch.Tensor):
+                            # 텐서 자체인 경우
+                            devices.add(str(embedding.device))
+
+                    # quantize 자체 확인
+                    for param in self.vl_gpt.gen_vision_model.quantize.parameters():
+                        devices.add(str(param.device))
+                        break
+
+                # post_quant_conv 확인
+                if hasattr(self.vl_gpt.gen_vision_model, "post_quant_conv"):
+                    if hasattr(self.vl_gpt.gen_vision_model.post_quant_conv, "weight"):
+                        devices.add(
+                            str(
+                                self.vl_gpt.gen_vision_model.post_quant_conv.weight.device
+                            )
+                        )
+                    else:
+                        for (
+                            param
+                        ) in self.vl_gpt.gen_vision_model.post_quant_conv.parameters():
+                            devices.add(str(param.device))
+                            break
+
+            # gen_head 장치 확인
+            if hasattr(self.vl_gpt, "gen_head"):
+                for param in self.vl_gpt.gen_head.parameters():
+                    devices.add(str(param.device))
+                    break
+
+            logger.debug(f"Model component devices: {devices}")
+
+            # 모든 장치가 동일한지 확인
+            is_consistent = len(devices) <= 1
+            if not is_consistent:
+                logger.warning(f"Model components are on different devices: {devices}")
+
+            return is_consistent
+
+        except Exception as e:
+            logger.error(f"Error validating model devices: {str(e)}")
+            return False
+
+    def _synchronize_model_devices(self) -> None:
+        """
+        모델의 모든 구성 요소가 동일한 장치에 있는지 확인하고 동기화
+        """
+        if not self.model_loaded or self.vl_gpt is None:
+            return
+
+        try:
+            # 현재 모델 상태 확인
+            is_consistent = self._validate_model_on_device()
+
+            # 일관성이 없으면 명시적으로 모든 구성 요소를 동일한 장치로 이동
+            if not is_consistent:
+                target_device = self.device
+                logger.info(
+                    f"Synchronizing model components to device: {target_device}"
+                )
+
+                # 전체 모델을 한 번에 이동
+                self._move_model_to_device(target_device)
+
+                # 이동 후 다시 검증
+                is_consistent = self._validate_model_on_device()
+                if not is_consistent:
+                    logger.warning(
+                        "Model components still on different devices after synchronization"
+                    )
+
+        except Exception as e:
+            logger.error(f"Error synchronizing model devices: {str(e)}")
 
     def load_model(self, force_reload: bool = False) -> bool:
         """
@@ -129,31 +581,88 @@ class ImageGenerator:
         logger.info(f"Starting model load: {self.model_path}")
         self.memory_manager.clear_gpu_memory()
 
+        # 메모리 상황 재평가 및 양자화 설정 조정
+        self._adjust_quantization_settings()
+
         try:
+            # 모델 경로 확인
+            if not os.path.exists(self.model_path):
+                logger.error(f"Model path does not exist: {self.model_path}")
+                raise FileNotFoundError(f"Model path not found: {self.model_path}")
+
             # 모델 설정 로드
             setting = AutoConfig.from_pretrained(self.model_path)
             language_config = setting.language_config
             language_config._attn_implementation = "eager"
 
             # 장치에 따른 데이터 타입 설정
-            cuda_device = self.memory_manager.cuda_device
-            dtype = torch.bfloat16 if cuda_device == "cuda" else torch.float32
+            use_cuda = self.use_cuda
+            dtype = torch.bfloat16 if use_cuda else torch.float32
+
+            # 현재 선택된 장치 (강제로 cuda:0 사용)
+            device = self.device
+
+            # device_map 설정 - 단일 GPU 강제 모드에서는 항상 None 사용
+            device_map = None
+
+            # 메모리 효율적인 로드 설정
+            load_kwargs = {
+                "language_config": language_config,
+                "trust_remote_code": True,
+                "device_map": device_map,  # 항상 None으로 설정하여 단일 장치 사용
+                "low_cpu_mem_usage": self.use_low_cpu_mem_usage,
+                "torch_dtype": dtype,
+            }
+
+            # 양자화 설정 적용
+            if self.use_4bit:
+                logger.info("Using 4-bit quantization for model loading")
+                try:
+                    from transformers import BitsAndBytesConfig
+
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=(
+                            torch.bfloat16 if use_cuda else torch.float32
+                        ),
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_type="nf4",
+                    )
+                    load_kwargs["quantization_config"] = quantization_config
+                except ImportError as e:
+                    logger.warning(
+                        f"bitsandbytes not available, falling back to 8-bit: {e}"
+                    )
+                    self.use_4bit = False
+                    self.use_8bit = True
+
+            if self.use_8bit:
+                logger.info("Using 8-bit quantization for model loading")
+                load_kwargs["load_in_8bit"] = True
+
+            logger.info(
+                f"Loading model to device: {device}, device_map: {device_map}, "
+                f"8bit: {self.use_8bit}, 4bit: {self.use_4bit}"
+            )
 
             # 모델 로드 (장치에 맞게)
             self.vl_gpt = AutoModelForCausalLM.from_pretrained(
-                self.model_path,
-                language_config=language_config,
-                trust_remote_code=True,
-                device_map="auto" if cuda_device == "cuda" else None,
-                low_cpu_mem_usage=True,
-                torch_dtype=dtype,
+                self.model_path, **load_kwargs
             )
 
             # 평가 모드로 설정
             self.vl_gpt = self.vl_gpt.eval()
 
+            # 양자화를 사용하지 않는 경우, 명시적으로 모델을 지정된 장치로 이동
+            if not self.use_4bit and not self.use_8bit and use_cuda:
+                logger.info(f"Moving model to specific device: {device}")
+                self.vl_gpt = self.vl_gpt.to(device)
+
+                # 모든 구성 요소를 동일한 장치로 이동
+                self._synchronize_model_devices()
+
             # CUDA 사용 시 추론 속도 향상을 위한 설정
-            if cuda_device == "cuda":
+            if use_cuda:
                 torch.backends.cudnn.benchmark = True
 
             # 프로세서 및 토크나이저 로드
@@ -161,9 +670,9 @@ class ImageGenerator:
             self.tokenizer = self.vl_chat_processor.tokenizer
 
             self.model_loaded = True
-            logger.info("Model load successful")
+            logger.info(f"Model load successful on {device}")
 
-            # 최종 메모리 정리
+            # 메모리 정리
             self.memory_manager.clear_gpu_memory()
             return True
 
@@ -171,6 +680,26 @@ class ImageGenerator:
             logger.error(f"Model load failed: {str(e)}")
             self.memory_manager.clear_gpu_memory()
             self.model_loaded = False
+
+            # OOM 오류 처리 - Janus-7B에서 Janus-1B로 대체 시도
+            if "CUDA out of memory" in str(e) and "7B" in self.model_path:
+                alt_model_path = self.model_path.replace("7B", "1B")
+                if os.path.exists(alt_model_path):
+                    logger.info(f"Trying to load smaller model: {alt_model_path}")
+                    self.model_path = alt_model_path
+                    self.model_size = self._detect_model_size()  # 모델 크기 업데이트
+                    self._adjust_quantization_settings()  # 양자화 설정 재조정
+                    return self.load_model(force_reload=True)
+                else:
+                    logger.error(f"Smaller model not found at {alt_model_path}")
+
+            # CPU 폴백 시도
+            if self.use_cuda and "CUDA out of memory" in str(e):
+                logger.info("Falling back to CPU due to CUDA memory issues")
+                self.use_cuda = False
+                self.device = "cpu"
+                return self.load_model(force_reload=True)
+
             raise
 
     def unload_model(self) -> bool:
@@ -186,10 +715,8 @@ class ImageGenerator:
         logger.info("Starting model unload from memory")
 
         try:
-            # CUDA 사용 시 먼저 CPU로 이동
+            # 모델 컴포넌트 정리
             if self.vl_gpt is not None:
-                if self.memory_manager.cuda_device == "cuda":
-                    self.vl_gpt = self.vl_gpt.cpu()
                 del self.vl_gpt
                 self.vl_gpt = None
 
@@ -252,7 +779,7 @@ class ImageGenerator:
             seed: 랜덤 시드 값
         """
         torch.manual_seed(seed)
-        if self.memory_manager.cuda_device == "cuda":
+        if self.memory_manager.is_cuda_available():
             torch.cuda.manual_seed(seed)
         np.random.seed(seed)
 
@@ -332,6 +859,35 @@ class ImageGenerator:
 
         return image_list
 
+    def _to_device(
+        self, tensor: torch.Tensor, device: Optional[str] = None
+    ) -> torch.Tensor:
+        """
+        텐서를 지정된 장치로 이동 (오류 처리 포함)
+
+        Args:
+            tensor: 이동할 텐서
+            device: 대상 장치 (지정하지 않으면 현재 장치 사용)
+
+        Returns:
+            torch.Tensor: 이동된 텐서
+        """
+        if tensor is None:
+            return None
+
+        target_device = device if device is not None else self.device
+
+        try:
+            return tensor.to(target_device)
+        except Exception as e:
+            logger.warning(f"Failed to move tensor to {target_device}: {e}")
+            # 실패 시 CPU로 폴백
+            try:
+                return tensor.cpu()
+            except Exception as inner_e:
+                logger.error(f"Failed to move tensor to CPU: {inner_e}")
+                return tensor
+
     @torch.inference_mode()
     def generate(
         self,
@@ -377,22 +933,30 @@ class ImageGenerator:
             logger.error(msg)
             raise RuntimeError(msg)
 
-        # GPU 메모리 정리 및 현재 상태 로깅
+        # 메모리 정리 및 로깅
         self.memory_manager.clear_gpu_memory()
-        logger.info(f"Starting generation of {parallel_size} parallel images")
+        logger.info(
+            f"Starting generation of {parallel_size} parallel images on {self.device}"
+        )
         logger.debug(
             f"Generation parameters: width={width}, height={height}, temperature={temperature}, cfg_weight={cfg_weight}"
         )
+
+        # 모델 구성 요소가 동일한 장치에 있는지 확인 - 매우 중요
+        self._synchronize_model_devices()
 
         import time
 
         generation_start_time = time.time()
 
         try:
+            # 입력 텐서를 현재 장치로 이동
+            input_ids = self._to_device(input_ids)
+
             # 입력 토큰 준비
-            tokens = torch.zeros((parallel_size * 2, len(input_ids)), dtype=torch.int)
-            if self.memory_manager.cuda_device == "cuda":
-                tokens = tokens.to(device=self.memory_manager.cuda_device)
+            tokens = torch.zeros(
+                (parallel_size * 2, len(input_ids)), dtype=torch.int, device=self.device
+            )
 
             # 토큰 초기화
             for i in range(parallel_size * 2):
@@ -400,15 +964,18 @@ class ImageGenerator:
                 if i % 2 != 0:
                     tokens[i, 1:-1] = self.vl_chat_processor.pad_id
 
+            # 임베딩 가져오기 전 명시적 동기화
+            self._synchronize_model_devices()
+
             # 입력 임베딩 가져오기
             inputs_embeds = self.vl_gpt.language_model.get_input_embeddings()(tokens)
 
             # 생성된 토큰 초기화
             generated_tokens = torch.zeros(
-                (parallel_size, image_token_num_per_image), dtype=torch.int
+                (parallel_size, image_token_num_per_image),
+                dtype=torch.int,
+                device=self.device,
             )
-            if self.memory_manager.cuda_device == "cuda":
-                generated_tokens = generated_tokens.cuda()
 
             # 효율적인 생성을 위한 이전 키-값
             pkv = None
@@ -441,6 +1008,10 @@ class ImageGenerator:
                 next_token = torch.cat(
                     [next_token.unsqueeze(dim=1), next_token.unsqueeze(dim=1)], dim=1
                 ).view(-1)
+
+                # 장치 일관성 유지
+                next_token = self._to_device(next_token)
+
                 img_embeds = self.vl_gpt.prepare_gen_img_embeds(next_token)
                 inputs_embeds = img_embeds.unsqueeze(dim=1)
 
@@ -457,15 +1028,23 @@ class ImageGenerator:
                     token_start = now
 
                     # 메모리 사용량 로깅
-                    if (
-                        self.memory_manager.cuda_device == "cuda"
-                        and torch.cuda.is_available()
-                    ):
-                        current_mem = torch.cuda.memory_allocated() / 1024**2
-                        logger.debug(
-                            f"Token {i}/{image_token_num_per_image} ({progress:.1f}%), "
-                            f"memory: {current_mem:.2f} MB"
-                        )
+                    if self.use_cuda:
+                        try:
+                            current_device_idx = (
+                                int(self.device.split(":")[-1])
+                                if ":" in self.device
+                                else 0
+                            )
+                            current_mem = (
+                                torch.cuda.memory_allocated(current_device_idx)
+                                / 1024**3
+                            )
+                            logger.debug(
+                                f"Token {i}/{image_token_num_per_image} ({progress:.1f}%), "
+                                f"memory: {current_mem:.2f} GB"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Error logging memory usage: {e}")
 
             # 평균 토큰 생성 시간 계산
             if token_times:
@@ -481,18 +1060,48 @@ class ImageGenerator:
             # 디코딩 전 로깅
             logger.debug("Token generation complete, decoding to image")
 
-            # 생성된 토큰을 이미지 패치로 디코딩
+            # 안전하게 디코딩 시도
             try:
-                patches = self.vl_gpt.gen_vision_model.decode_code(
-                    generated_tokens.to(dtype=torch.int),
+                # CPU에서 디코딩 수행 - 항상 CPU에서 디코딩하여 장치 불일치 방지
+                logger.info("Performing decoding on CPU for consistency")
+
+                # 전체 모델을 CPU로 이동
+                cpu_vl_gpt = self.vl_gpt.cpu()
+                cpu_tokens = generated_tokens.cpu()
+
+                # CPU에서 디코딩 수행 (안전한 방법)
+                patches = cpu_vl_gpt.gen_vision_model.decode_code(
+                    cpu_tokens,
                     shape=[parallel_size, 8, width // patch_size, height // patch_size],
                 )
+
+                # 디코딩 후 다시 원래 장치로 복원
+                if self.use_cuda:
+                    self.vl_gpt = self.vl_gpt.to(self.device)
+                    patches = patches.to(self.device)
+
+                    # 모델 동기화 재확인
+                    self._synchronize_model_devices()
+
             except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
-                    logger.error("CUDA out of memory during decoding")
-                    self.memory_manager.clear_gpu_memory()
-                    raise MemoryError("Insufficient GPU memory for decoding") from e
-                raise
+                logger.error(f"Runtime error in decode_code: {str(e)}")
+                # CUDA 메모리 부족 또는 장치 불일치 오류 모두 CPU 폴백
+                logger.info("Falling back to complete CPU operation")
+
+                # 모든 작업을 CPU로 이동
+                self.vl_gpt = self.vl_gpt.cpu()
+                cpu_tokens = generated_tokens.cpu()
+
+                # CPU에서 디코딩
+                patches = self.vl_gpt.gen_vision_model.decode_code(
+                    cpu_tokens,
+                    shape=[parallel_size, 8, width // patch_size, height // patch_size],
+                )
+
+                # 다시 CUDA로 복원 (필요시)
+                if self.use_cuda:
+                    self.vl_gpt = self.vl_gpt.to(self.device)
+                    patches = patches.to(self.device)
 
             # 생성 완료 로깅
             generation_time = time.time() - generation_start_time
@@ -503,34 +1112,72 @@ class ImageGenerator:
             # 메모리 정리
             self.memory_manager.clear_gpu_memory()
 
-            return generated_tokens.to(dtype=torch.int), patches
+            return generated_tokens, patches
 
         except ValueError as e:
-            # 입력 검증 오류
             logger.error(f"Invalid input parameters: {str(e)}")
             self.memory_manager.clear_gpu_memory()
             raise
 
         except MemoryError as e:
-            # 메모리 관련 오류
             logger.error(f"Memory error during generation: {str(e)}")
             self.memory_manager.clear_gpu_memory()
             raise
 
         except RuntimeError as e:
-            # 런타임 오류 (주로 PyTorch에서)
+            logger.error(f"Runtime error in generate method: {str(e)}")
+            self.memory_manager.clear_gpu_memory()
+
+            # CUDA 오류인 경우 더 구체적인 메시지 제공
             error_msg = str(e)
             if "CUDA out of memory" in error_msg:
-                logger.error(f"CUDA out of memory: {error_msg}")
-                self.memory_manager.clear_gpu_memory()
-                raise MemoryError(f"GPU memory insufficient: {error_msg}") from e
+                # OOM 오류 - CPU 모드로 전환
+                logger.info("CUDA out of memory. Trying CPU mode...")
+                self.use_cuda = False
+                self.device = "cpu"
+
+                # 모델 언로드 후 CPU 모드로 재로드
+                self.model_loaded = False
+                self.load_model(force_reload=True)
+
+                # CPU에서 다시 시도
+                return self.generate(
+                    input_ids.cpu(),
+                    width,
+                    height,
+                    temperature,
+                    parallel_size,
+                    cfg_weight,
+                    image_token_num_per_image,
+                    patch_size,
+                )
+            elif "Expected all tensors to be on the same device" in error_msg:
+                # 장치 불일치 오류 - CPU 모드로 전환
+                logger.error("Device mismatch detected. Trying with CPU...")
+
+                # 모든 작업을 CPU에서 수행
+                self.use_cuda = False
+                self.device = "cpu"
+
+                # 모델을 CPU로 이동
+                if self.vl_gpt is not None:
+                    self.vl_gpt = self.vl_gpt.cpu()
+
+                # CPU에서 다시 시도
+                return self.generate(
+                    input_ids.cpu(),
+                    width,
+                    height,
+                    temperature,
+                    parallel_size,
+                    cfg_weight,
+                    image_token_num_per_image,
+                    patch_size,
+                )
             else:
-                logger.error(f"Runtime error in generate method: {error_msg}")
-                self.memory_manager.clear_gpu_memory()
                 raise
 
         except Exception as e:
-            # 예상치 못한 오류에 대한 포괄적 처리
             logger.exception(f"Unexpected error in generate method: {str(e)}")
             self.memory_manager.clear_gpu_memory()
             raise
@@ -583,6 +1230,16 @@ class ImageGenerator:
 
         except Exception as e:
             logger.error(f"Error during image generation: {str(e)}")
+
+            # CUDA 메모리 오류 처리
+            if "CUDA out of memory" in str(e) and self.use_cuda:
+                logger.info("Trying CPU mode due to GPU memory constraints")
+                self.use_cuda = False
+                self.device = "cpu"
+
+                # CPU 모드로 다시 시도
+                return self.generate_image(prompt, seed, guidance)
+
             raise
         finally:
             # 메모리 정리 보장
