@@ -16,9 +16,50 @@ class ImagePrompt:
         """LLM 인스턴스 가져오기"""
         if self._llm is None:
             self._llm = ChatOllama(
-                model="phi4:latest", temperature=0.7, num_predict=512
+                model="phi4:latest", temperature=0.7, num_predict=512, streaming=True
             )
         return self._llm
+
+    async def translate_and_enhance_stream(self, message: str):
+        """
+        메시지를 영어로 번역하고 필요시 내용을 풍부하게 만들며 토큰을 스트리밍함
+
+        Args:
+            message: 원본 사용자 메시지
+
+        Yields:
+            str: 번역 및 향상된 영어 프롬프트의 토큰
+        """
+        try:
+            if len(message) < 20:  # 짧은 메시지 기준 (조정 가능)
+                prompt = f"""
+                아래 한국어 메시지를 상세한 이미지 생성용 영어 프롬프트로 변환해주세요.
+                메시지가 짧거나 구체적이지 않은 경우, 이미지 생성에 도움될 디테일을 추가해주세요.
+                결과는 영어로만 작성하고, 설명 없이 프롬프트 텍스트만 반환해주세요.
+                
+                메시지: {message}
+                """
+            else:
+                prompt = f"""
+                아래 한국어 메시지를 이미지 생성용 영어 프롬프트로 번역해주세요.
+                결과는 영어로만 작성하고, 설명 없이 프롬프트 텍스트만 반환해주세요.
+                
+                메시지: {message}
+                """
+
+            # 스트리밍 호출 방식으로 변경
+            async for chunk in self.llm.astream(prompt):
+                # 토큰 단위로 응답 반환
+                if hasattr(chunk, "content") and chunk.content:
+                    yield chunk.content
+                    logger.debug(f"Streaming prompt token: {chunk.content}")
+
+            logger.info(f"Prompt streaming completed")
+
+        except Exception as e:
+            logger.error(f"Error streaming prompt: {str(e)}")
+            # 오류 발생 시 기본 번역만 시도
+            yield f"Generate an image of {message}"
 
     async def translate_and_enhance(self, message: str) -> str:
         """

@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional, AsyncGenerator
 
 from app.core.config import settings
 from app.services.image.image_core import image_generator
+from app.services.image.image_prompt import image_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +246,24 @@ class ImageService:
         # 태스크 초기화
         task = await self.task_manager.create_task(conversation_id)
 
+        # 프롬프트 처리를 시작하기 전에 상태 업데이트
+        yield {
+            "event": "prompt_start",
+            "data": json.dumps({"text": "Processing your prompt..."}),
+        }
+
+        # 프롬프트 저장을 위한 변수
+        full_prompt = ""
+
+        # 스트리밍 방식으로 프롬프트 처리
+        async for prompt_chunk in image_prompt.translate_and_enhance_stream(prompt):
+            full_prompt += prompt_chunk
+            # 프롬프트 청크를 클라이언트에 전송
+            yield {"event": "prompt_chunk", "data": json.dumps({"text": prompt_chunk})}
+
+        # 프롬프트 처리 완료 알림
+        yield {"event": "prompt_complete", "data": ""}
+
         # 진행률 업데이트 콜백 정의
         def progress_callback(progress: float) -> None:
             """진행률 업데이트 및 리스너에게 알림"""
@@ -267,7 +286,8 @@ class ImageService:
             """백그라운드에서 이미지 생성 실행"""
             try:
                 task["images"] = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: image_generator.generate_image(prompt, seed, guidance)
+                    None,
+                    lambda: image_generator.generate_image(full_prompt, seed, guidance),
                 )
             except Exception as e:
                 logger.error(
