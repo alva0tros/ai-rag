@@ -271,12 +271,12 @@ class ImageService:
             task["progress_event"].set()
 
             # 로그 수준 조정 (10% 단위 정보는 INFO, 세부 진행은 DEBUG)
-            if progress % 10 < 0.5 or progress >= 99.5:
-                logger.info(f"Conversation {conversation_id}: progress {progress:.1f}%")
-            else:
-                logger.debug(
-                    f"Conversation {conversation_id}: progress update {progress:.1f}%"
-                )
+            # if progress % 10 < 0.5 or progress >= 99.5:
+            #     logger.info(f"Conversation {conversation_id}: progress {progress:.1f}%")
+            # else:
+            #     logger.debug(
+            #         f"Conversation {conversation_id}: progress update {progress:.1f}%"
+            #     )
 
         # 콜백 설정
         image_generator.progress_callback = progress_callback
