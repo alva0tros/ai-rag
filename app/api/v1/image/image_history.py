@@ -55,7 +55,7 @@ async def delete_image_session(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.patch("/image/update_session/{session_id}")
+@router.post("/image/update_session/{session_id}")
 async def update_image_session_title(
     session_id: str, new_title: str = Body(..., embed=True)
 ):
@@ -85,7 +85,7 @@ class UpdateImageMessageRequest(BaseModel):
     dislike_feedback: str = None
 
 
-@router.patch("/image/update_message/{session_id}/{message_id}")
+@router.post("/image/update_message/{session_id}/{message_id}")
 async def update_message(
     session_id: str,
     message_id: str,
