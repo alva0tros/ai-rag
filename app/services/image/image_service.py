@@ -372,7 +372,7 @@ class ImageService:
             yield {"event": "prompt_chunk", "data": json.dumps({"text": prompt_chunk})}
 
         # 프롬프트 처리 완료 알림
-        yield {"event": "prompt_complete", "data": json.dums({"text": ""})}
+        yield {"event": "prompt_complete", "data": json.dumps({"text": ""})}
 
         # 진행률 업데이트 콜백 정의
         def progress_callback(progress: float) -> None:

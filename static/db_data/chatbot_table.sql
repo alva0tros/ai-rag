@@ -31,7 +31,7 @@ ALTER TABLE public.chat_messages ADD CONSTRAINT chat_messages_fk1 FOREIGN KEY (s
 
 CREATE TABLE image_sessions (
 	id serial4 NOT NULL,
-	session_id uuid NOT NULL,
+	session_id varchar(21) NOT NULL,
 	user_id int4 DEFAULT 1 NOT NULL,
 	title varchar(255) NOT NULL,
 	created_at timestamp DEFAULT now() NULL,
@@ -42,8 +42,8 @@ CREATE TABLE image_sessions (
 
 CREATE TABLE public.image_messages (
 	id serial4 NOT NULL,
-	session_id uuid NOT NULL,
-	message_id uuid NOT NULL,
+	session_id varchar(21) NOT NULL,
+	message_id varchar(21) NOT NULL,
 	image_seq int4 NOT NULL,
 	user_message text NOT NULL,
 	image_prompt text NOT NULL,
