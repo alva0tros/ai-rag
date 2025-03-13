@@ -8,8 +8,10 @@ from sqlalchemy import (
     func,
     UniqueConstraint,
     ForeignKey,
+    ForeignKeyConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID
+
+# from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -34,7 +36,7 @@ class ImageSession(Base):
 class ImageMessage(Base):
     """
     DB 모델: image_messages
-    각 이미지 요청마다 사용자 메시지와 AI 프롬프트를를 저장합니다.
+    각 이미지 요청마다 사용자 메시지와 AI 프롬프트를 저장합니다.
     """
 
     __tablename__ = "image_messages"
@@ -46,10 +48,8 @@ class ImageMessage(Base):
         nullable=False,
     )
     message_id = Column(String(21), nullable=False)
-    image_seq = Column(Integer, nullable=False)
     user_message = Column(Text, nullable=False)
     image_prompt = Column(Text, nullable=False)
-    image_url = Column(Text, nullable=True)
     liked = Column(Boolean, nullable=True)
     disliked = Column(Boolean, nullable=True)
     dislike_feedback = Column(Text, nullable=True)
@@ -57,7 +57,34 @@ class ImageMessage(Base):
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
+        UniqueConstraint("session_id", "message_id", name="image_messages_uk1"),
+    )
+
+
+class ImageMessageUrl(Base):
+    """
+    DB 모델: image_message_urls
+    각 이미지 메시지에 대한 URL 정보를 저장합니다.
+    """
+
+    __tablename__ = "image_message_urls"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(21), nullable=False)
+    message_id = Column(String(21), nullable=False)
+    image_seq = Column(Integer, nullable=False)
+    image_url = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
         UniqueConstraint(
-            "session_id", "message_id", "image_seq", name="image_messages_uk1"
+            "session_id", "message_id", "image_seq", name="image_message_urls_uk1"
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "message_id"],
+            ["image_messages.session_id", "image_messages.message_id"],
+            name="image_message_urls_fk1",
+            ondelete="CASCADE",
         ),
     )

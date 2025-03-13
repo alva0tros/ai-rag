@@ -78,10 +78,8 @@ class StorageManager:
         self,
         conversation_id: str,
         message_id: str,
-        image_seq: int,
         user_message: str,
         image_prompt: str,
-        image_url: Optional[str],
     ) -> None:
         """
         이미지 메시지를 데이터베이스에 저장합니다.
@@ -97,10 +95,8 @@ class StorageManager:
             await image_repository.create_image_message(
                 conversation_id,
                 message_id,
-                image_seq,
                 user_message,
                 image_prompt,
-                image_url,
             )
         except Exception as db_e:
             logger.exception("DB 저장 실패 (이미지 메시지 저장): %s", db_e)
