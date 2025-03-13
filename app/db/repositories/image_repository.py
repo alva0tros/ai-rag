@@ -10,11 +10,11 @@ logger = logging.getLogger(__name__)
 
 
 # 생성(Create) 관련 함수
-async def create_image_session(session_id, title, user_id):
+async def create_image_session(session_id, user_id, title):
     async with async_session() as session:
         async with session.begin():
             new_session = ImageSession(
-                session_id=session_id, title=title, user_id=user_id
+                session_id=session_id, user_id=user_id, title=title
             )
             session.add(new_session)
     logger.info("Created image session for session_id: %s", session_id)

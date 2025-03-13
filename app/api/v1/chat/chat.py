@@ -3,7 +3,9 @@
 """
 
 import asyncio
-import uuid
+
+# import uuid
+from nanoid import generate as nanoid
 import logging
 from typing import Optional
 
@@ -66,10 +68,10 @@ async def chat(request: Request):
 
     # conversation_id가 없는 경우 새로운 ID 생성
     is_new_conversation = not chat_request.conversation_id
-    conversation_id = chat_request.conversation_id or str(uuid.uuid4())
+    conversation_id = chat_request.conversation_id or nanoid(size=12)
 
     # message_id가 없는 경우 새로운 ID 생성
-    message_id = chat_request.message_id or str(uuid.uuid4())
+    message_id = chat_request.message_id or nanoid(size=12)
 
     # 응답 큐 생성
     queue = asyncio.Queue()
