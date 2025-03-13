@@ -21,7 +21,7 @@ async def create_image_session(session_id, title, user_id):
 
 
 async def create_image_message(
-    session_id, message_id, user_message, image_prompt, image_url
+    session_id, message_id, image_seq, user_message, image_prompt, image_url
 ):
     async with async_session() as session:
         async with session.begin():
@@ -49,6 +49,7 @@ async def create_image_message(
                 new_message = ImageMessage(
                     session_id=session_id,
                     message_id=message_id,
+                    image_seq=image_seq,
                     user_message=user_message,
                     image_prompt=image_prompt,
                     image_url=image_url,

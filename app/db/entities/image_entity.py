@@ -46,6 +46,7 @@ class ImageMessage(Base):
         nullable=False,
     )
     message_id = Column(UUID(as_uuid=True), nullable=False)
+    image_seq = Column(Integer, nullable=False)
     user_message = Column(Text, nullable=False)
     image_prompt = Column(Text, nullable=False)
     image_url = Column(Text, nullable=True)
@@ -56,5 +57,7 @@ class ImageMessage(Base):
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        UniqueConstraint("session_id", "message_id", name="image_messages_uk1"),
+        UniqueConstraint(
+            "session_id", "message_id", "image_seq", name="image_messages_uk1"
+        ),
     )

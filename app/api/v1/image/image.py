@@ -49,9 +49,9 @@ async def generate_from_prompt(request: Request) -> EventSourceResponse:
             raise HTTPException(status_code=400, detail="Missing required fields")
 
         # 대화 ID가 없으면 새로 생성
-        if not conversation_id:
+        is_new_conversation = not conversation_id
+        if is_new_conversation:
             conversation_id = nanoid(size=12)
-            logger.info(f"Generated new conversation ID: {conversation_id}")
 
         logger.info(f"Received image generation prompt from user {user_id}")
 
@@ -62,7 +62,13 @@ async def generate_from_prompt(request: Request) -> EventSourceResponse:
         # 서비스를 사용하여 이미지 생성 과정과 결과 스트리밍
         return EventSourceResponse(
             image_service.stream_generation_progress(
-                message, None, 5.0, user_id, conversation_id, message_id
+                message,
+                None,
+                5.0,
+                user_id,
+                conversation_id,
+                message_id,
+                is_new_conversation,
             )
         )
 

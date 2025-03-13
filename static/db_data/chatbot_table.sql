@@ -44,6 +44,7 @@ CREATE TABLE public.image_messages (
 	id serial4 NOT NULL,
 	session_id uuid NOT NULL,
 	message_id uuid NOT NULL,
+	image_seq int4 NOT NULL,
 	user_message text NOT NULL,
 	image_prompt text NOT NULL,
 	image_url TEXT NULL,
@@ -53,7 +54,7 @@ CREATE TABLE public.image_messages (
 	created_at timestamp DEFAULT now() NULL,
 	updated_at timestamp DEFAULT now() NULL,
 	CONSTRAINT image_messages_pk PRIMARY KEY (id),
-	CONSTRAINT image_messages_uk1 UNIQUE (session_id, message_id)
+	CONSTRAINT image_messages_uk1 UNIQUE (session_id, message_id, image_seq)
 );
 
 

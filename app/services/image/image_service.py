@@ -16,8 +16,115 @@ from typing import List, Dict, Any, Optional, AsyncGenerator
 from app.core.config import settings
 from app.services.image.image_core import image_generator
 from app.services.image.image_prompt import image_prompt
+from app.db.repositories import image_repository
 
 logger = logging.getLogger(__name__)
+
+
+# ==========================================================
+# 저장 관리 클래스
+# ==========================================================
+
+
+class StorageManager:
+    """데이터 저장 관련 기능을 제공하는 클래스"""
+
+    async def generate_and_save_title(
+        self,
+        prompt: str,
+        conversation_id: str,
+        user_id: Optional[int],
+    ) -> str:
+        """
+        대화 제목을 생성하고 저장합니다.
+
+        Args:
+            prompt: 사용자 메시지
+            conversation_id: 대화 세션 ID
+            user_id: 사용자 ID
+
+        Returns:
+            생성된 제목
+        """
+        from app.utils.title_generator import get_title_generator
+
+        try:
+            # 제목 생성기 가져오기
+            title_generator = get_title_generator()
+
+            # 제목 생성 (최대 30자)
+            title = title_generator.generate_title(prompt, max_length=30)
+
+            try:
+                # 세션 저장
+                await image_repository.create_image_session(
+                    conversation_id, user_id, title
+                )
+            except Exception as db_e:
+                logger.exception("DB 저장 실패 (세션 저장): %s", db_e)
+                # 제목 생성은 성공했으므로 에러를 다시 발생시키지 않고 계속 진행
+
+            return title
+        except Exception as e:
+            logger.error(f"제목 생성 오류: {e}")
+
+            # 오류 발생 시 간단한 대체 제목 생성
+            cleaned_prompt = prompt.strip()
+            if len(cleaned_prompt) > 30:
+                return cleaned_prompt[:30] + "..."
+            return cleaned_prompt
+
+    async def save_image_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        image_seq: int,
+        user_message: str,
+        image_prompt: str,
+        image_url: Optional[str],
+    ) -> None:
+        """
+        이미지 메시지를 데이터베이스에 저장합니다.
+
+        Args:
+            conversation_id: 대화 세션 ID
+            message_id: 메시지 ID
+            user_message: 사용자 메시지
+            image_prompt: 이미지 생성 프롬프트
+            image_url: 생성된 이미지 URL
+        """
+        try:
+            await image_repository.create_image_message(
+                conversation_id,
+                message_id,
+                image_seq,
+                user_message,
+                image_prompt,
+                image_url,
+            )
+        except Exception as db_e:
+            logger.exception("DB 저장 실패 (이미지 메시지 저장): %s", db_e)
+            # 메시지 저장 실패는 치명적이지 않으므로 경고만 로깅하고 계속 진행
+
+    async def check_session_exists(self, conversation_id: str) -> bool:
+        """
+        세션 존재 여부 확인
+
+        Args:
+            conversation_id: 대화 ID
+
+        Returns:
+            bool: 세션 존재 여부
+        """
+        try:
+            # 세션 정보 조회
+            messages = await image_repository.get_image_messages(
+                conversation_id, limit=1
+            )
+            return len(messages) > 0
+        except Exception as e:
+            logger.exception(f"Error checking session existence: {str(e)}")
+            return False
 
 
 class TaskManager:
@@ -171,8 +278,10 @@ class ImageService:
         if self._is_initialized:
             return
 
-        # 태스크 관리자 초기화
+        # 관리자 초기화
         self.task_manager = TaskManager()
+        self.storage_manager = StorageManager()
+
         logger.info("ImageService initialization complete")
         self._is_initialized = True
 
@@ -228,6 +337,7 @@ class ImageService:
         user_id: int,
         conversation_id: str,
         message_id: str,
+        is_new_conversation: bool,
     ) -> AsyncGenerator[Dict[str, str], None]:
         """
         이미지 생성 진행 상황 및 결과 스트리밍
@@ -262,7 +372,7 @@ class ImageService:
             yield {"event": "prompt_chunk", "data": json.dumps({"text": prompt_chunk})}
 
         # 프롬프트 처리 완료 알림
-        yield {"event": "prompt_complete", "data": ""}
+        yield {"event": "prompt_complete", "data": json.dums({"text": ""})}
 
         # 진행률 업데이트 콜백 정의
         def progress_callback(progress: float) -> None:
@@ -292,9 +402,6 @@ class ImageService:
             logger.debug(f"Starting event generator for conversation {conversation_id}")
 
             # 이미지 생성을 백그라운드로 시작
-            logger.debug(
-                f"Starting image generation task for conversation {conversation_id}"
-            )
             task["generate_task"] = asyncio.create_task(generate_images())
 
             # 진행률 스트리밍 (1% 단위로 전송)
@@ -320,6 +427,19 @@ class ImageService:
                 f"Image generation for conversation {conversation_id} completed"
             )
 
+            # 첫 요청이면 제목 생성 및 저장 후 conversation_id 반환
+            if is_new_conversation:
+                yield {
+                    "event": "conversation_id",
+                    "data": json.dumps({"text": conversation_id}),
+                }
+                yield {"event": "title_start", "data": json.dumps({"text": ""})}
+                title = await self.storage_manager.generate_and_save_title(
+                    prompt, conversation_id, user_id
+                )
+
+                yield {"event": "title", "data": json.dumps({"text": title})}
+
             # 이미지 저장 및 URL 반환
             if task["images"]:
                 logger.debug(
@@ -329,9 +449,21 @@ class ImageService:
                     task["images"], user_id, conversation_id, message_id
                 )
 
-                logger.info(
-                    f"Generated {len(image_urls)} images for conversation {conversation_id}"
-                )
+                # 이미지 메시지 저장
+                for i, image_url in enumerate(image_urls):
+                    try:
+                        await self.storage_manager.save_image_message(
+                            conversation_id,
+                            message_id,
+                            i,
+                            prompt,
+                            full_prompt,
+                            image_url,
+                        )
+                    except Exception as db_e:
+                        logger.exception(
+                            f"DB 저장 실패 (이미지 {i+1}/{len(image_urls)}): %s", db_e
+                        )
 
                 yield {"event": "image", "data": json.dumps({"image_urls": image_urls})}
 
@@ -339,13 +471,13 @@ class ImageService:
             logger.warning(
                 f"Image generation task for conversation {conversation_id} was cancelled"
             )
-            yield {"event": "error", "data": "Task was cancelled"}
+            yield {"event": "error", "data": json.dumps({"text": "Task was cancelled"})}
 
         except Exception as e:
             logger.exception(
                 f"Error streaming progress for conversation {conversation_id}: {str(e)}"
             )
-            yield {"event": "error", "data": str(e)}
+            yield {"event": "error", "data": json.dumps({"text": str(e)})}
 
         finally:
             # 작업 정리

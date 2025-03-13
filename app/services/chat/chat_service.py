@@ -21,7 +21,7 @@ from app.services.chat.chat_core import (
     MessageProcessor,
     EventManager,
 )
-from app.db.repositories import chat_repository as chat_crud
+from app.db.repositories import chat_repository
 
 # ==========================================================
 # 기본 설정
@@ -94,7 +94,9 @@ class StorageManager:
         # main_title, _ = message_processor.parse_message(title)
 
         try:
-            await chat_crud.create_chat_session(conversation_id, main_title, user_id)
+            await chat_repository.create_chat_session(
+                conversation_id, main_title, user_id
+            )
         except Exception as db_e:
             logger.exception("DB 저장 실패 (세션 저장): %s", db_e)
             # 제목 생성은 성공했으므로 에러를 다시 발생시키지 않고 계속 진행
@@ -122,7 +124,7 @@ class StorageManager:
             think_time: 생각 시간 (초)
         """
         try:
-            await chat_crud.create_chat_message(
+            await chat_repository.create_chat_message(
                 conversation_id,
                 message_id,
                 user_message,
