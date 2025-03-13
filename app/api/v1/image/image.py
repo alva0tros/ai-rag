@@ -14,7 +14,6 @@ from fastapi import APIRouter, Request, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.services.image.image_service import image_service
-from app.services.image.image_prompt import image_prompt
 from app.core.config import settings
 
 # 라우터 및 로거 설정
