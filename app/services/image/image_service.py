@@ -102,6 +102,34 @@ class StorageManager:
             logger.exception("DB 저장 실패 (이미지 메시지 저장): %s", db_e)
             # 메시지 저장 실패는 치명적이지 않으므로 경고만 로깅하고 계속 진행
 
+    async def save_image_urls(
+        self, conversation_id: str, message_id: str, image_urls: List[str]
+    ) -> None:
+        """
+        이미지 URL을 데이터베이스에 저장합니다.
+
+        Args:
+            conversation_id: 대화 세션 ID
+            message_id: 메시지 ID
+            image_urls: 이미지 URL 목록
+        """
+        try:
+            # 기존 URL 삭제 (모든 시퀀스)
+            await image_repository.delete_image_message_url(conversation_id, message_id)
+
+            # 새 URL 추가
+            for i, image_url in enumerate(image_urls):
+                print(" IIIIIIIIIIIIIIIIIIIIIIIIIII ::: ", i)
+                await image_repository.create_image_message_url(
+                    conversation_id, message_id, i, image_url  # 시퀀스 번호
+                )
+
+            logger.info(
+                f"Successfully saved {len(image_urls)} image URLs for session {conversation_id}, message {message_id}"
+            )
+        except Exception as db_e:
+            logger.exception(f"DB 저장 실패 (이미지 URL 저장): %s", db_e)
+
     async def check_session_exists(self, conversation_id: str) -> bool:
         """
         세션 존재 여부 확인
@@ -436,6 +464,14 @@ class ImageService:
 
                 yield {"event": "title", "data": json.dumps({"text": title})}
 
+            # 이미지 메시지 저장
+            await self.storage_manager.save_image_message(
+                conversation_id,
+                message_id,
+                prompt,
+                full_prompt,
+            )
+
             # 이미지 저장 및 URL 반환
             if task["images"]:
                 logger.debug(
@@ -445,21 +481,10 @@ class ImageService:
                     task["images"], user_id, conversation_id, message_id
                 )
 
-                # 이미지 메시지 저장
-                for i, image_url in enumerate(image_urls):
-                    try:
-                        await self.storage_manager.save_image_message(
-                            conversation_id,
-                            message_id,
-                            i,
-                            prompt,
-                            full_prompt,
-                            image_url,
-                        )
-                    except Exception as db_e:
-                        logger.exception(
-                            f"DB 저장 실패 (이미지 {i+1}/{len(image_urls)}): %s", db_e
-                        )
+                # 이미지 URL 저장
+                await self.storage_manager.save_image_urls(
+                    conversation_id, message_id, image_urls
+                )
 
                 yield {"event": "image", "data": json.dumps({"image_urls": image_urls})}
 

@@ -3,7 +3,7 @@ import datetime
 from sqlalchemy import select, delete
 
 from app.db.session import async_session
-from app.db.entities.image_entity import ImageSession, ImageMessage
+from app.db.entities.image_entity import ImageSession, ImageMessage, ImageMessageUrl
 
 
 logger = logging.getLogger(__name__)
@@ -20,9 +20,7 @@ async def create_image_session(session_id, user_id, title):
     logger.info("Created image session for session_id: %s", session_id)
 
 
-async def create_image_message(
-    session_id, message_id, image_seq, user_message, image_prompt, image_url
-):
+async def create_image_message(session_id, message_id, user_message, image_prompt):
     async with async_session() as session:
         async with session.begin():
             # session_id와 message_id로 기존 메시지 조회
@@ -37,7 +35,6 @@ async def create_image_message(
             if message_obj:
                 # 기존 메시지가 있다면 업데이트
                 message_obj.image_prompt = image_prompt
-                message_obj.image_url = image_url
                 logger.info(
                     "Updated image message for session_id: %s, message_id: %s",
                     session_id,
@@ -49,13 +46,53 @@ async def create_image_message(
                 new_message = ImageMessage(
                     session_id=session_id,
                     message_id=message_id,
-                    image_seq=image_seq,
                     user_message=user_message,
                     image_prompt=image_prompt,
-                    image_url=image_url,
                 )
                 session.add(new_message)
                 logger.info("Created image message for session_id: %s", session_id)
+
+
+async def create_image_message_url(session_id, message_id, image_seq, image_url):
+    """
+    이미지 메시지 URL을 저장합니다.
+    """
+    async with async_session() as session:
+        async with session.begin():
+            # 이미 존재하는지 확인
+            result = await session.execute(
+                select(ImageMessageUrl).where(
+                    ImageMessageUrl.session_id == session_id,
+                    ImageMessageUrl.message_id == message_id,
+                    ImageMessageUrl.image_seq == image_seq,
+                )
+            )
+            url_obj = result.scalars().first()
+
+            if url_obj:
+                # 기존 URL이 있다면 업데이트
+                url_obj.image_url = image_url
+                logger.info(
+                    "Updated image URL for session_id: %s, message_id: %s, seq: %s",
+                    session_id,
+                    message_id,
+                    image_seq,
+                )
+            else:
+                # 기존 URL이 없으면 새로 생성
+                new_url = ImageMessageUrl(
+                    session_id=session_id,
+                    message_id=message_id,
+                    image_seq=image_seq,
+                    image_url=image_url,
+                )
+                session.add(new_url)
+                logger.info(
+                    "Created image URL for session_id: %s, message_id: %s, seq: %s",
+                    session_id,
+                    message_id,
+                    image_seq,
+                )
 
 
 # 조회(Read) 관련 함수
@@ -106,7 +143,11 @@ async def get_all_image_sessions(user_id: int):
 
 
 async def get_image_messages(session_id, limit=100, offset=0):
+    """
+    이미지 메시지와 함께 연결된 URL 정보를 가져옵니다.
+    """
     async with async_session() as session:
+        # 메시지 조회
         result = await session.execute(
             select(ImageMessage)
             .where(ImageMessage.session_id == session_id)
@@ -115,10 +156,40 @@ async def get_image_messages(session_id, limit=100, offset=0):
             .limit(limit)
         )
         messages = result.scalars().all()
+
+        # 메시지당 URL 조회
+        messages_with_urls = []
+        for msg in messages:
+            # URL 조회
+            url_result = await session.execute(
+                select(ImageMessageUrl)
+                .where(
+                    ImageMessageUrl.session_id == session_id,
+                    ImageMessageUrl.message_id == msg.message_id,
+                )
+                .order_by(ImageMessageUrl.image_seq.asc())
+            )
+            urls = url_result.scalars().all()
+
+            # 메시지 객체에 URLs 속성 추가
+            msg_dict = {
+                "session_id": str(msg.session_id),
+                "message_id": str(msg.message_id),
+                "user_message": msg.user_message,
+                "image_prompt": msg.image_prompt,
+                "liked": msg.liked,
+                "disliked": msg.disliked,
+                "dislike_feedback": msg.dislike_feedback,
+                "created_at": msg.created_at,
+                "updated_at": msg.updated_at,
+                "image_urls": [url.image_url for url in urls],
+            }
+            messages_with_urls.append(msg_dict)
+
         logger.debug(
             "Fetched %d messages for session_id: %s", len(messages), session_id
         )
-        return messages
+        return messages_with_urls
 
 
 # 삭제(Delete) 관련 함수
