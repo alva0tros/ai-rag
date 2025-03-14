@@ -177,12 +177,10 @@ async def get_image_messages(session_id, limit=100, offset=0):
                 "message_id": str(msg.message_id),
                 "user_message": msg.user_message,
                 "image_prompt": msg.image_prompt,
+                "image_urls": [url.image_url for url in urls],
                 "liked": msg.liked,
                 "disliked": msg.disliked,
                 "dislike_feedback": msg.dislike_feedback,
-                "created_at": msg.created_at,
-                "updated_at": msg.updated_at,
-                "image_urls": [url.image_url for url in urls],
             }
             messages_with_urls.append(msg_dict)
 

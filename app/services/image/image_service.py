@@ -115,11 +115,10 @@ class StorageManager:
         """
         try:
             # 기존 URL 삭제 (모든 시퀀스)
-            await image_repository.delete_image_message_url(conversation_id, message_id)
+            # await image_repository.delete_image_message_url(conversation_id, message_id)
 
             # 새 URL 추가
             for i, image_url in enumerate(image_urls):
-                print(" IIIIIIIIIIIIIIIIIIIIIIIIIII ::: ", i)
                 await image_repository.create_image_message_url(
                     conversation_id, message_id, i, image_url  # 시퀀스 번호
                 )

@@ -32,14 +32,14 @@ async def get_image_messages(session_id, limit=100, offset=0):
     messages = await image_repository.get_image_messages(session_id, limit, offset)
     messages_data = [
         {
-            "session_id": str(msg.session_id),
-            "message_id": str(msg.message_id),
-            "user_message": msg.user_message,
-            "image_prompt": msg.image_prompt,
-            "image_url": msg.image_url,
-            "liked": msg.liked,
-            "disliked": msg.disliked,
-            "dislike_feedback": msg.dislike_feedback,
+            "session_id": str(msg["session_id"]),
+            "message_id": str(msg["message_id"]),
+            "user_message": msg["user_message"],
+            "image_prompt": msg["image_prompt"],
+            "image_urls": msg["image_urls"],
+            "liked": msg["liked"],
+            "disliked": msg["disliked"],
+            "dislike_feedback": msg["dislike_feedback"]
         }
         for msg in messages
     ]
